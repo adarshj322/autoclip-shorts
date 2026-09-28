@@ -44,7 +44,7 @@ def parse_duration_iso8601(s: str) -> int:
     if not s:
         return 0
     m = _DURATION_RE.match(s.strip())
-    if not m:
+    if not m or not any(v is not None for v in m.groupdict().values()):
         raise ValueError(f"Invalid ISO 8601 duration: {s!r}")
     parts = {k: int(v) if v is not None else 0 for k, v in m.groupdict().items()}
     return (
@@ -69,7 +69,7 @@ def filter_candidates(
         vid = v.get("video_id", "")
         if vid in seen:
             continue
-        if int(v.get("duration_sec") or 0) < min_sec:
+        if _to_int(v.get("duration_sec"), 0) < min_sec:
             continue
         channel = v.get("channel", "")
         if allow is not None and channel not in allow:
@@ -94,6 +94,10 @@ def _get_json(http_get, url: str, params: dict) -> dict:
     except Exception as e:
         raise DiscoveryError(f"YouTube API request failed: {e}") from e
     if isinstance(resp, dict):
+        if _body_says_quota(resp):
+            raise DiscoveryError(_QUOTA_MESSAGE)
+        if isinstance(resp.get("error"), dict):
+            raise DiscoveryError(f"YouTube API error: {resp['error']}")
         return resp
     status = getattr(resp, "status_code", 200)
     try:
@@ -101,21 +105,44 @@ def _get_json(http_get, url: str, params: dict) -> dict:
     except Exception:
         body = {}
     if status == 403 or _body_says_quota(body):
-        raise DiscoveryError(
-            "YouTube API quota exceeded (403/quotaExceeded). "
-            "Check YT_API_KEY quota in Google Cloud Console and retry tomorrow."
-        )
+        raise DiscoveryError(_QUOTA_MESSAGE)
     if status >= 400:
         raise DiscoveryError(f"YouTube API error HTTP {status}: {body}")
     return body if isinstance(body, dict) else {}
 
 
+_QUOTA_REASONS = frozenset({"quotaexceeded", "dailylimitexceeded", "ratelimitexceeded"})
+
+_QUOTA_MESSAGE = (
+    "YouTube API quota exceeded (403/quotaExceeded). "
+    "Check YT_API_KEY quota in Google Cloud Console and retry tomorrow."
+)
+
+
 def _body_says_quota(body) -> bool:
-    try:
-        text = str(body).lower()
-    except Exception:
+    """True only when the API *error object* signals quota exhaustion.
+
+    Inspects ``body["error"]`` (``errors[].reason``/``message`` and the
+    top-level error ``message``/``status``) — never video content such as
+    titles/descriptions, so a video mentioning "quota" cannot trip this.
+    """
+    if not isinstance(body, dict):
         return False
-    return "quota" in text or "dailylimitexceeded" in text or "ratelimitexceeded" in text
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return False
+    errors = err.get("errors")
+    if isinstance(errors, list):
+        for entry in errors:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("reason", "")).lower() in _QUOTA_REASONS:
+                return True
+            if "quota" in str(entry.get("message", "")).lower():
+                return True
+    if "quota" in str(err.get("message", "")).lower():
+        return True
+    return str(err.get("status", "")).lower() in ("quota_exceeded", "resource_exhausted")
 
 
 def _to_int(value, default: int = 0) -> int:
