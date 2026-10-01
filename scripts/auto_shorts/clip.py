@@ -75,4 +75,10 @@ def run_and_parse(video: Path, srt: Path | None, min_score: float = DEFAULT_MIN_
         raise RuntimeError(
             f"autoclip run failed for {video}: {(getattr(result, 'stderr', '') or '').strip()}"
         )
-    return parse_run_json(json.loads(result.stdout or "{}"))
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"autoclip run produced invalid JSON for {video}: {e}"
+        ) from e
+    return parse_run_json(payload)

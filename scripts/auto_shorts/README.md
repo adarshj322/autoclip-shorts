@@ -68,14 +68,17 @@ channels are processed), `blocklist.txt` (always skipped).
 See `cron.example`. Canonical line (single instance via `flock -n`):
 
 ```cron
-0 9 * * * flock -n /tmp/auto_shorts.lock /opt/auto-shorts/venv/bin/python -m scripts.auto_shorts.run >> /opt/auto-shorts/logs/auto_shorts.log 2>&1
+0 9 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd /path/to/autoclip && /opt/auto-shorts/venv/bin/python -m scripts.auto_shorts.run' >> /opt/auto-shorts/logs/auto_shorts.log 2>&1
 ```
 
-Run from the repo root so `-m scripts.auto_shorts.run` resolves.
+The `cd /path/to/autoclip &&` prefix sets CWD to the repo root so
+`-m scripts.auto_shorts.run` resolves (cron runs with CWD=$HOME).
 Rotate `logs/` with logrotate; back up the ledger + `.env` with `tar`
 (keys are never committed).
 
-systemd alternative: a `.service` (`Type=oneshot`, same command) paired
+systemd alternative: a `.service` (`Type=oneshot`,
+`WorkingDirectory=/path/to/autoclip`, same `bash -c 'cd ... && ...'`
+command or `ExecStart` with the repo root as working dir) paired
 with a `.timer` (`OnCalendar=daily`, `Persistent=true`) instead of cron.
 
 ## Publishing: private first, public by hand

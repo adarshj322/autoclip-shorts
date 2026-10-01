@@ -41,9 +41,11 @@ def build_publish_cmd(
     project_id: str,
     clip_id: str,
     privacy: str = "private",
+    title: str | None = None,
+    description: str | None = None,
 ) -> list[str]:
     """Build ``autoclip publish <pid> --clip <id> --platform youtube ...``."""
-    return [
+    cmd = [
         "autoclip",
         "publish",
         project_id,
@@ -56,6 +58,11 @@ def build_publish_cmd(
         "--wait",
         "--json",
     ]
+    if title is not None:
+        cmd += ["--title", title]
+    if description is not None:
+        cmd += ["--description", description]
+    return cmd
 
 
 def parse_publish_json(payload: dict) -> dict:
@@ -84,4 +91,8 @@ def run_and_parse(cmd: list[str], runner=None) -> dict:
     result = run(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"autoclip command failed {' '.join(cmd)}: {(getattr(result, 'stderr', '') or '').strip()}")
-    return parse_publish_json(json.loads(result.stdout or "{}"))
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"autoclip command produced invalid JSON {' '.join(cmd)}: {e}") from e
+    return parse_publish_json(payload)

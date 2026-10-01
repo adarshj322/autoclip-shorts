@@ -160,7 +160,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     ledger_path = base / LEDGER_NAME
-    data = ledger_mod.load_ledger(ledger_path)
+    try:
+        data = ledger_mod.load_ledger(ledger_path)
+    except (OSError, ValueError) as e:
+        _emit({"ok": False, "error": f"ledger load failed: {e}",
+               "processed": [], "skipped": []})
+        return 1
     seen = set((data.get("seen") or {}).keys())
 
     try:
@@ -240,17 +245,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             processed.append({"video_id": vid, "project_id": project_id,
                               "request_id": None, "status": "dry_run"})
-            ledger_mod.mark_result(data, vid, {"status": "dry_run",
-                                              "project_id": project_id,
-                                              "title": video.get("title", ""),
-                                              "url": url,
-                                              "timestamp": _now_iso()})
+            # NB: dry-run must not touch the ledger, otherwise a later
+            # real run would treat this video as already seen and skip it.
             continue
 
+        clip_title = export_mod.truncate_youtube_title(
+            top.get("title") or video.get("title", ""))
+        description = export_mod.build_description(
+            top.get("title") or video.get("title", ""), url)
         try:
             pub = export_mod.run_and_parse(
                 export_mod.build_publish_cmd(project_id, clip_id,
-                                             privacy=cfg.privacy))
+                                             privacy=cfg.privacy,
+                                             title=clip_title,
+                                             description=description))
         except export_mod.PublishSkipped as e:
             skipped.append({"video_id": vid, "reason": f"publish_skipped: {e}"})
             ledger_mod.mark_result(data, vid, {"status": "skipped",

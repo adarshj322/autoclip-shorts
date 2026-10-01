@@ -1,4 +1,5 @@
 # Auto-Shorts daily cron (single instance via flock -n).
-# Install: crontab -e, run from the repo root so "-m scripts.auto_shorts.run" resolves.
+# Install: crontab -e. The "cd" prefix sets CWD to the repo root so
+# "-m scripts.auto_shorts.run" resolves (cron runs with CWD=$HOME).
 # Logs: stdout JSON summary + stderr progress appended to the log file.
-0 9 * * * flock -n /tmp/auto_shorts.lock /opt/auto-shorts/venv/bin/python -m scripts.auto_shorts.run >> /opt/auto-shorts/logs/auto_shorts.log 2>&1
+0 9 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd /path/to/autoclip && /opt/auto-shorts/venv/bin/python -m scripts.auto_shorts.run' >> /opt/auto-shorts/logs/auto_shorts.log 2>&1
