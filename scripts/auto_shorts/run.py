@@ -218,6 +218,14 @@ def main(argv: list[str] | None = None) -> int:
 
         project_id = parsed.get("project_id")
         clip_id = top.get("id")
+        if not project_id or not clip_id:
+            reason = (f"export_failed: missing project_id/clip_id "
+                      f"(project_id={project_id!r}, clip_id={clip_id!r})")
+            skipped.append({"video_id": vid, "reason": reason})
+            ledger_mod.mark_result(data, vid, {"status": "skipped",
+                                              "reason": reason,
+                                              "timestamp": _now_iso()})
+            continue
         try:
             export_mod.run_and_parse(
                 export_mod.build_export_cmd(project_id, clip_id))
