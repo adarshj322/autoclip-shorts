@@ -1,3 +1,7 @@
+> **Fork 注意 / Note:** 这是 [adarshj322/autoclip-shorts](https://github.com/adarshj322/autoclip-shorts) —— 上游 AutoClip 的独立 fork，不会向上游提 PR。默认分支 `feat/auto-shorts-vps` 即本功能分支；`main` 仅镜像上游。
+>
+> **Standalone fork** of upstream AutoClip. No PRs back upstream — `main` mirrors upstream, feature work lives on `feat/auto-shorts-vps` (default branch).
+
 <div align="center">
 
 <img src="src-tauri/icons/128x128.png" alt="AutoClip" width="72" height="72">
@@ -26,6 +30,33 @@
 </div>
 
 **[1.5.0 已正式发布](https://github.com/zhouxiaoka/autoclip/releases/tag/v1.5.0)**，桌面、CLI 与 MCP 同步更新。一键出片、字幕分页、人物取景与长视频队列修复见 [更新日志](CHANGELOG.md)。旧版用户请升级。
+
+## 全自动 AI 短片 / Automated AI Shorts（本 fork 功能）
+
+每天自动发现 AI  trending 长视频 → 用 AutoClip 剪出一条 Shorts → 以**私密**上传到你的 YouTube，你在 YouTube Studio 里手动公开。实现见 [`scripts/auto_shorts/`](scripts/auto_shorts/)（venv + cron，无需 Docker/Redis）。
+
+需要的 Key（三类，自备）：
+- `YT_API_KEY` —— YouTube Data API v3（趋势发现）
+- LLM Key（`LLM_PROVIDER` + 对应 `API_*`，如 DashScope/OpenAI/Gemini）
+- `UPLOAD_POST_API_KEY` + `UPLOAD_POST_USER` —— 经 Upload-Post 发布到 YouTube
+
+快速开始（Linux VPS）：
+
+```bash
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+cp scripts/auto_shorts/env.example .env.auto_shorts  # 填好 Key，每次运行前 source
+source .env.auto_shorts
+python -m scripts.auto_shorts.run --dry-run   # 先试跑，不发布
+python -m scripts.auto_shorts.run             # 正式跑，私密上传
+```
+
+定时任务（每天 09:00，`flock` 防重入）：
+
+```cron
+0 9 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd /path/to/autoclip-shorts && source .env.auto_shorts && venv/bin/python -m scripts.auto_shorts.run' >> logs/auto_shorts.log 2>&1
+```
+
+说明：默认只发**私密**（`privacyStatus=private`），公开需手动操作；成片标题注明原片来源。转用方式与注意事项详见 [`scripts/auto_shorts/README.md`](scripts/auto_shorts/README.md)。
 
 ## 真实成片
 
