@@ -3,8 +3,9 @@ import { workflow } from '../analytics/observer'
 import i18n, { t } from '../i18n'
 import { useTranslation } from 'react-i18next'
 import React, { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { studioApi } from '../features/studio/api'
+import { outputVariantPublishTarget } from '../features/studio/outputVariantPublish'
 import { projectApi } from '../services/api'
 import { Btn, Icon, ProgressLine, Row, Segmented, StatusDot } from '../ui'
 import { openExternalLink } from '../utils/externalLinks'
@@ -73,6 +74,7 @@ const PublishClipPage: React.FC = () => {
   useTranslation()
   const { id: projectId = '', clipId = '' } = useParams()
   const studioJobId = /^studio-[a-f0-9]{32}$/.test(clipId) ? clipId.slice(7) : null
+  const variantTarget = outputVariantPublishTarget(useLocation().search)
   const [studioRevision, setStudioRevision] = useState<number>()
   const navigate = useNavigate()
   const runId = useRef(0)
@@ -122,6 +124,7 @@ const PublishClipPage: React.FC = () => {
         }
         const clip = clips.find((item) => item.id === clipId)
         let nextTitle = clip?.generated_title || clip?.title || ''
+        let coverSlot = 'bilibili'
         if (studioJobId) {
           const workspace = await studioApi.get(projectId)
           if (cancelled || runId.current !== session) return
@@ -129,13 +132,21 @@ const PublishClipPage: React.FC = () => {
           if (!exported) throw new Error(t('成片尚未完成或不存在，请返回项目重新导出'))
           nextTitle = exported.title
           setStudioRevision(exported.revision)
+          // An automatic output arrives with its publish kit: start from its copy and cover.
+          const variant = (workspace.output_variants || []).find(item => item.id === variantTarget.uploadPost)
+          if (variant?.post) {
+            nextTitle = variant.post.title || nextTitle
+            setTitle(variant.post.title)
+            setDescription([variant.post.description, variant.post.tags.map(tag => `#${tag}`).join(' ')].filter(Boolean).join('\n\n'))
+          }
+          if (variant && !['bilibili', 'youtube_long', 'original'].includes(variant.strategy_id)) coverSlot = 'douyin'
         }
         setClipTitle(nextTitle)
         setCoverTitle(nextTitle)
         setConfigured(cfg.configured)
         setBiliConfigured(bili.configured)
         try {
-          const existing = await coverApi.get(projectId, clipId, 'bilibili')
+          const existing = await coverApi.get(projectId, clipId, coverSlot)
           if (!cancelled && runId.current === session && existing.ok && existing.url) {
             setCover(existing)
             if (existing.title) setCoverTitle(existing.title)
@@ -174,6 +185,14 @@ const PublishClipPage: React.FC = () => {
   const toggle = (platform: string) => {
     setSelected((cur) => cur.includes(platform) ? cur.filter((p) => p !== platform) : [...cur, platform])
   }
+
+  // Covers are on by default: make one as soon as the page is ready so the user sees it instead of an empty box.
+  const autoCover = useRef(false)
+  useEffect(() => {
+    if (loading || error || cover || coverBusy || autoCover.current) return
+    autoCover.current = true
+    void generateCover()
+  }, [loading, error, cover, coverBusy])
 
   const generateCover = async () => {
     if (!projectId || !clipId || coverBusy) return
@@ -257,6 +276,7 @@ const PublishClipPage: React.FC = () => {
           platforms: overseas,
           user,
           preset: renderPreset(overseas),
+          output_variant_id: variantTarget.uploadPost,
           title: title.trim() || undefined,
           description: description.trim() || undefined,
           subtitles,
@@ -269,6 +289,7 @@ const PublishClipPage: React.FC = () => {
       }
       if (sendBili) {
         const started = await bilibiliApi.start(projectId, clipId, {
+          output_variant_id: variantTarget.bilibili,
           title: title.trim() || undefined,
           description: description.trim() || undefined,
           subtitles,
@@ -309,7 +330,7 @@ const PublishClipPage: React.FC = () => {
         if (!settled.pending && !observed.has(track.jobId)) {
           observed.add(track.jobId)
           if (telemetryEnabled) socialPublishObserved(telemetryGeneration, {
-            source_type: studioJobId ? 'studio' : 'legacy', gateway: track.kind,
+            ...workflow.context(projectId, studioJobId || undefined), source_type: studioJobId ? 'studio' : 'legacy', gateway: track.kind,
             outcome: socialPublishOutcome(job.status, settled.scheduled, settled.results),
           })
         }
@@ -489,13 +510,13 @@ const PublishClipPage: React.FC = () => {
         )}
         {!loading && !studioJobId && (
           <>
-            <Row label={t("字幕")} hint={t("从原字幕切出本段并烧进画面")}>
+            <Row label={t("字幕")} hint={t("把这段的字幕压进画面")}>
               <Segmented size="sm" ariaLabel={t("字幕")} value={subtitles ? 'on' : 'off'} onChange={(v) => setSubtitles(v === 'on')}
-                options={[{ value: 'on', label: t("烧录") }, { value: 'off', label: t("不要") }]} />
+                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不显示") }]} />
             </Row>
-            <Row label={t("标题卡")} hint={t("片头约 4 秒显示切片标题")}>
-              <Segmented size="sm" ariaLabel={t("标题卡")} value={titleCard ? 'on' : 'off'} onChange={(v) => setTitleCard(v === 'on')}
-                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不要") }]} />
+            <Row label={t("片头标题")} hint={t("片头约 4 秒显示标题文字")}>
+              <Segmented size="sm" ariaLabel={t("片头标题")} value={titleCard ? 'on' : 'off'} onChange={(v) => setTitleCard(v === 'on')}
+                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不显示") }]} />
             </Row>
           </>
         )}

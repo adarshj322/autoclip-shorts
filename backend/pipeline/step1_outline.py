@@ -76,6 +76,8 @@ class OutlineExtractor:
         # 2. 基于时间智能分块（短 / 中视频整条一块，长视频 ~30 分钟一块）
         interval = 30 if profile.tier == "long" else max(1, int(profile.total_sec // 60) + 1)
         chunks = self.text_processor.chunk_srt_data(srt_data, interval_minutes=interval)
+        from .settings import processing_int
+        chunks = self.text_processor.limit_srt_chunk_size(chunks, processing_int("chunk_size", 5000, 1000, 10000))
         logger.info(f"文本已按~{interval}分钟/块切分，共{len(chunks)}个块")
         
         # 3. 保存文本块和SRT块到中间文件
@@ -86,32 +88,31 @@ class OutlineExtractor:
         failed_chunks = 0
         last_error: Optional[BaseException] = None
         
-        # 4. 逐一处理每个文本块文件
-        for i, chunk_file in enumerate(chunk_files):
+        # 4. 每个文本块独立调用模型（并行，结果按块顺序）
+        def outline_chunk(item):
+            i, chunk_file = item
             logger.info(f"处理第{i+1}/{len(chunks)}个文本块: {chunk_file.name}")
             try:
-                # 读取文本块内容
                 with open(chunk_file, 'r', encoding='utf-8') as f:
                     chunk_text = f.read()
-                
-                # 为每个块调用LLM
-                input_data = {"text": chunk_text}
-                response = self.llm_client.call_with_retry(outline_prompt, input_data)
-                
-                if response:
-                    # 解析响应并附加块索引
-                    # 注意：这里的chunk_index直接用i，与文件名和原始chunk对应
-                    parsed_outlines = self._parse_outline_response(response, i)
-                    all_outlines.extend(parsed_outlines)
-                else:
+                response = self.llm_client.call_with_retry(outline_prompt, {"text": chunk_text})
+                if not response:
                     logger.warning(f"处理第{i+1}个文本块时返回空响应")
+                    return [], None
+                # chunk_index 直接用 i，与文件名和原始 chunk 对应
+                return self._parse_outline_response(response, i), None
             except Exception as e:
-                # 单块失败可以继续（长视频某一块偶发超时不该毁掉整条），但要记账：
-                # 全部失败 = 提供商 / key / 模型不对，必须报错而不是交一个空大纲出去
-                failed_chunks += 1
-                last_error = e
                 logger.error(f"处理第{i+1}个文本块失败: {e}")
-                continue
+                return [], e
+
+        from .concurrency import map_chunks
+        for parsed_outlines, error in map_chunks(outline_chunk, enumerate(chunk_files)):
+            # 单块失败可以继续（长视频某一块偶发超时不该毁掉整条），但要记账：
+            # 全部失败 = 提供商 / key / 模型不对，必须报错而不是交一个空大纲出去
+            if error is not None:
+                failed_chunks += 1
+                last_error = error
+            all_outlines.extend(parsed_outlines)
 
         total_chunks = len(chunk_files)
         if total_chunks and failed_chunks == total_chunks:
@@ -162,6 +163,9 @@ class OutlineExtractor:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(srt_entries, f, ensure_ascii=False, indent=2)
         
+        (self.srt_chunks_dir / "manifest.json").write_text(
+            json.dumps([f"chunk_{chunk['chunk_index']}.json" for chunk in chunks]), encoding="utf-8"
+        )
         logger.info(f"所有SRT块已保存到: {self.srt_chunks_dir}")
 
     def _parse_outline_response(self, response: str, chunk_index: int) -> List[Dict]:
@@ -175,6 +179,21 @@ class OutlineExtractor:
         Returns:
             解析后的大纲结构
         """
+        # 分类提示词同时存在 JSON 和 Markdown 契约，统一成下游结构。
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.strip(), flags=re.IGNORECASE)
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            data = None
+        if isinstance(data, list):
+            return [
+                {"title": item["title"].strip(),
+                 "subtopics": [s.strip() for s in item.get("subtopics", []) if isinstance(s, str) and s.strip()],
+                 "chunk_index": chunk_index}
+                for item in data
+                if isinstance(item, dict) and isinstance(item.get("title"), str)
+                and item["title"].strip() and isinstance(item.get("subtopics", []), list)
+            ]
         outlines = []
         lines = response.split('\n')
         current_outline = None

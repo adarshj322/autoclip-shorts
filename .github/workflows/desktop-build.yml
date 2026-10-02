@@ -196,14 +196,46 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.sig
           retention-days: 30
 
+  # 没有 Windows 真机时的替代冒烟：在干净的 windows-latest 上装上一个正式版，
+  # 模拟旧版后端残留锁住 _asyncio.pyd，再静默覆盖安装本次构建，然后用安装目录里的 Python
+  # 跑后端 / ffmpeg / 来源守卫。界面和真实链接下载仍需人工或用户验证，见 RELEASE_CHECKLIST.md。
+  smoke-windows-x64:
+    needs: build-windows-x64
+    if: needs.build-windows-x64.result == 'success'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download new installer
+        uses: actions/download-artifact@v4
+        with:
+          name: autoclip-desktop-windows-x64
+          path: new
+
+      - name: Upgrade over previous release and verify installed runtime
+        run: |
+          $installer = Get-ChildItem -Recurse new -Filter '*-setup.exe' | Select-Object -First 1
+          ./scripts/windows_upgrade_smoke.ps1 -NewInstaller $installer.FullName
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-report
+          path: windows-smoke.json
+          if-no-files-found: ignore
+
   # Publish only after both platforms succeed; never advertise a partial release.
   release:
-    if: startsWith(github.ref, 'refs/tags/v') && needs.build-macos-arm64.result == 'success' && needs.build-windows-x64.result == 'success'
-    needs: [build-macos-arm64, build-windows-x64]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.build-macos-arm64.result == 'success' && needs.build-windows-x64.result == 'success' && needs.smoke-windows-x64.result == 'success'
+    needs: [build-macos-arm64, build-windows-x64, smoke-windows-x64]
     runs-on: ubuntu-latest
-    env:
-      # 放在 job 级：step 自己的 env 在它的 if 里读不到
-      WEBSITE_DISPATCH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -217,6 +249,22 @@ jobs:
 
       - name: List artifacts
         run: ls -la dist
+
+      - name: Set up Python for CLI and MCP release
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build and verify CLI and MCP wheel from the same tag
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-cjk
+          python -m pip install -r requirements.txt
+          python -m pip install 'opencv-python-headless>=4.10'
+          python -m pip wheel --no-deps --wheel-dir dist .
+          python scripts/verify_python_wheel.py dist/autoclip-*-py3-none-any.whl --video backend/assets/example/source.mp4 --report "$RUNNER_TEMP/wheel-portrait-report.json"
+          python scripts/build_python_release.py dist/autoclip-*-py3-none-any.whl --out "dist/autoclip-${GITHUB_REF_NAME#v}-cli-mcp.zip"
+          (cd dist && sha256sum *.whl *-cli-mcp.zip > python-release-sha256.txt)
 
       # Release 正文 = CHANGELOG.md 里该版本的段落 + 平台安装说明（scripts/release_notes.py，仅标准库）
       - name: Render release notes from CHANGELOG
@@ -238,24 +286,16 @@ jobs:
           python3 scripts/write_updater_manifest.py "${ARGS[@]}"
           ls -la dist/latest.json 2>/dev/null || echo "NOTE: latest.json not written (no signed artifacts)"
 
-      - name: Create / update GitHub Release
+      # 先以 Pre-release 发出：应用内更新读的是 releases/latest/download/latest.json，
+      # Pre-release 不算 latest，所以这时只有手动下载的人拿得到。
+      # 真机冒烟 + 观察期通过后，跑 promote-release.yml 转正，才推给所有用户。见 RELEASE_CHECKLIST.md。
+      - name: Create / update GitHub Release (pre-release)
         uses: softprops/action-gh-release@v2
         with:
           name: "AutoClip Desktop ${{ github.ref_name }}"
           files: dist/*
           body_path: release_body.md
+          prerelease: true
+          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 通知官网仓库更新版本号 / 下载链接（autoclip_intro/.github/workflows/sync-release.yml）。
-      # 需要 WEBSITE_DISPATCH_TOKEN（fine-grained PAT，仓库 autoclip_intro，Contents: Read and write）；
-      # 没配就跳过——官网那边有每日 cron 兜底。见 scripts/website/README.md。
-      - name: Notify website (repository_dispatch)
-        if: env.WEBSITE_DISPATCH_TOKEN != ''
-        run: |
-          curl -sS -f -X POST \
-            -H "Authorization: Bearer $WEBSITE_DISPATCH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/zhouxiaoka/autoclip_intro/dispatches \
-            -d '{"event_type":"autoclip-release","client_payload":{"tag":"${{ github.ref_name }}"}}'
-          echo "已通知官网同步到 ${{ github.ref_name }}"
