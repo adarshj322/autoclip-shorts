@@ -9,6 +9,7 @@ autoclip — 命令行出片。
     autoclip run video.mp4 --srt video.srt --min-score 0.6 --json
     autoclip list / show <project_id> / providers / doctor
     autoclip publish <project_id> --clip 2 --platform tiktok --platform youtube   # 经 Upload-Post 发到海外平台
+    autoclip mcp install opencode                  # 把 AutoClip 写进 opencode 的 MCP 配置（默认全局）
 
 产物与桌面应用共用同一个数据目录（mac: ~/Library/Application Support/AutoClip），
 跑完在桌面应用首页就能看到。用 --data-dir 或 AUTOCLIP_DATA_DIR 可以换目录。
@@ -18,12 +19,14 @@ autoclip — 命令行出片。
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+from backend import __version__
 
 # 只 import 不触发数据库 / 模型初始化的东西；重活放在子命令里、configure_environment 之后
 from backend.services.local_runner import (
@@ -59,7 +62,7 @@ def _err(msg: str) -> None:
 
 def _add_llm_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("模型（不填则用桌面应用设置页里的配置）")
-    g.add_argument("--provider", choices=PROVIDER_CHOICES, help="dashscope / openai / gemini / deepseek / seed / kimi / glm / grok，或本地预设 ollama / lmstudio")
+    g.add_argument("--provider", choices=PROVIDER_CHOICES, help="dashscope / openai / gemini / deepseek / seed / kimi / glm / grok / infistar / api88，或本地预设 ollama / lmstudio")
     g.add_argument("--model", help="模型名，如 qwen-plus、gpt-4o-mini、qwen2.5:7b")
     g.add_argument("--base-url", help="OpenAI 兼容接口地址（provider=openai 时用；ollama/lmstudio 有默认值）")
     g.add_argument("--api-key", help="API Key（本地模型可不填）。也可用环境变量 AUTOCLIP_API_KEY")
@@ -75,6 +78,35 @@ def _llm_override(args: argparse.Namespace) -> LLMOverride:
 
 
 # ---------------------------------------------------------------- run ---
+def cmd_produce(args: argparse.Namespace) -> int:
+    from backend.services import quick_output_runner as quick
+    try:
+        # Providers and ASR may print progress from worker threads. Keep stdout parseable
+        # for scripts, just as the MCP stdio entry point keeps its protocol stream clean.
+        with contextlib.redirect_stdout(sys.stderr):
+            project_id = quick.start(args.source, args.platform or ['douyin'], name=args.name, srt_path=args.srt,
+                                     instruction=args.instruction, browser=args.browser, portrait_style=args.portrait_style)
+            if not args.json:
+                print(f'1.5 一键出片 · {project_id} · 进度写入项目目录', file=sys.stderr)
+            result = quick.wait(project_id, timeout=args.timeout)
+        result['ok'] = result['status'] in ('completed', 'partial') and not result.get('timed_out')
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result['ok'] else 1
+    except (ValueError, FileNotFoundError) as error:
+        print(json.dumps({'ok': False, 'error': str(error)}, ensure_ascii=False))
+        return 2
+
+
+def cmd_outputs(args: argparse.Namespace) -> int:
+    from backend.services import quick_output_runner as quick
+    try:
+        print(json.dumps(quick.status(args.project_id, export_kits=args.export_kits), ensure_ascii=False, indent=2))
+        return 0
+    except (ValueError, FileNotFoundError) as error:
+        print(json.dumps({'ok': False, 'error': str(error)}, ensure_ascii=False))
+        return 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from backend.services.local_runner import configure_llm, prepare_project, run_pipeline, summarize_project
 
@@ -206,6 +238,8 @@ def cmd_providers(args: argparse.Namespace) -> int:
         ("kimi", "Kimi（月之暗面）", "需要 key；国内直连"),
         ("glm", "智谱 GLM", "需要 key；国内直连"),
         ("grok", "Grok（xAI）", "需要 key"),
+        ("api88", "88API Token聚合平台（赞助）", "需要 key，新用户注册赠送体验额度"),
+        ("infistar", "Infistar 无限星河（赞助）", "需要 key，专属链接注册可领体验额度"),
     ] + [
         (p.key, p.display_name, f"无需 key；默认 {p.base_url}" + (f"，默认模型 {p.default_model}" if p.default_model else ""))
         for p in LOCAL_PRESETS.values()
@@ -442,9 +476,56 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------- mcp ---
 def cmd_mcp(args: argparse.Namespace) -> int:
+    if getattr(args, "mcp_cmd", None) == "install":
+        return cmd_mcp_install(args)
     from backend.mcp_server import main as mcp_main
 
     return mcp_main()
+
+
+def _print_opencode_next_steps() -> None:
+    print(_dim("  在 opencode 里直接说：把 C:\\Videos\\talk.mp4 切片，它会调 AutoClip 的 MCP 工具"))
+    print(_dim("  模型没配好先跑 autoclip doctor；opencode 要新开会话才会加载新的 MCP"))
+
+
+def cmd_mcp_install(args: argparse.Namespace) -> int:
+    """把 AutoClip 写进 MCP 客户端配置；目前支持 opencode。"""
+    from backend.services import opencode_setup
+
+    target = opencode_setup.opencode_config_path(args.scope, Path(args.dir) if args.dir else None)
+    if args.print_only:
+        snippet = opencode_setup.render_snippet(opencode_setup.build_entry(), name=args.name)
+        if args.json:
+            print(json.dumps({"client": args.client, "path": str(target), "snippet": snippet}, ensure_ascii=False, indent=2))
+        else:
+            print(snippet)
+            print(_dim(f"\n把上面的片段合并进 {target}"), file=sys.stderr)
+        return 0
+
+    explicit_config = args.scope == "global" and bool(os.environ.get("OPENCODE_CONFIG"))
+    report = opencode_setup.install_opencode(
+        target, name=args.name, force=args.force, discover_jsonc=not explicit_config,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    elif report["action"] == "created":
+        print(_c("32", "✓ ") + f"已写入 {report['path']}")
+        _print_opencode_next_steps()
+    elif report["action"] == "updated":
+        print(_c("32", "✓ ") + f"已更新 {report['path']} 的 mcp.{args.name}")
+        if report.get("backup"):
+            print(_dim(f"  旧配置已备份：{report['backup']}"))
+        _print_opencode_next_steps()
+    elif report["action"] == "unchanged":
+        print(_dim(f"• {report['path']} 里已有相同的 mcp.{args.name}，未改动"))
+    else:
+        _err(report.get("error") or "写入失败")
+        if report.get("hint"):
+            print(_dim(f"  {report['hint']}"), file=sys.stderr)
+        print(report["snippet"])
+    for w in report.get("warnings") or []:
+        print(_dim(f"  ! {w}"), file=sys.stderr)
+    return 0 if report["ok"] else 1
 
 
 # ---------------------------------------------------------------- parser ---
@@ -456,8 +537,26 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__.split("\n\n", 1)[1] if __doc__ else None,
     )
     p.add_argument("--data-dir", help="数据目录（默认与桌面应用共用；也可用 AUTOCLIP_DATA_DIR）")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("-v", "--verbose", action="store_true", help="在终端输出后端日志")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    q = sub.add_parser('produce', help='1.5 一键出片：平台视频、封面、发布文案与发布包（共用桌面设置）')
+    q.add_argument('source', help='本地视频路径或 HTTPS 的 YouTube / B 站链接')
+    q.add_argument('--platform', action='append', help='平台，可重复：douyin / xiaohongshu / tiktok / instagram_reels / youtube_shorts / youtube_long / bilibili')
+    q.add_argument('--name')
+    q.add_argument('--srt', help='本地 SRT 字幕文件')
+    q.add_argument('--instruction', default='')
+    q.add_argument('--portrait-style', choices=['auto', 'interview', 'podcast'], default='auto', help='竖版版式；画幅和文字语言仍按平台')
+    q.add_argument('--browser', choices=['chrome', 'edge', 'firefox', 'safari'])
+    q.add_argument('--timeout', type=float, default=7200, help='等待秒数；超时不会取消项目')
+    q.add_argument('--json', action='store_true', help='只在 stdout 输出 JSON 结果')
+    q.set_defaults(func=cmd_produce)
+
+    outputs = sub.add_parser('outputs', help='查询一键出片进度和文件路径（不触发生成）')
+    outputs.add_argument('project_id')
+    outputs.add_argument('--export-kits', action='store_true', help='为已完成的版本写入发布包 ZIP')
+    outputs.set_defaults(func=cmd_outputs)
 
     r = sub.add_parser("run", help="处理一条视频，输出切片与合集")
     r.add_argument("video", help="视频文件路径")
@@ -492,8 +591,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_llm_args(d)
     d.set_defaults(func=cmd_doctor)
 
-    m = sub.add_parser("mcp", help="以 MCP server（stdio）方式运行，供 Cursor / Claude 调用")
-    m.set_defaults(func=cmd_mcp)
+    m = sub.add_parser("mcp", help="以 MCP server（stdio）方式运行，供 Cursor / Claude / opencode 调用；install 子命令自动写客户端配置")
+    m.set_defaults(func=cmd_mcp)  # 不带子命令 = 直接起 server（子命令的分发在 cmd_mcp 里判断）
+    mi_sub = m.add_subparsers(dest="mcp_cmd")
+    mi = mi_sub.add_parser("install", help="把 AutoClip 写进 MCP 客户端配置（目前支持 opencode）")
+    mi.add_argument("client", nargs="?", default="opencode", choices=["opencode"], help="MCP 客户端（默认 opencode）")
+    mi.add_argument("--scope", choices=["global", "project"], default="global",
+                    help="global=~/.config/opencode/opencode.json；project=<--dir 目录>/opencode.json")
+    mi.add_argument("--dir", help="project 模式的项目目录（默认当前目录）")
+    mi.add_argument("--name", default="autoclip", help="配置里的 MCP 服务名（默认 autoclip）")
+    mi.add_argument("--print", dest="print_only", action="store_true", help="只打印配置片段，不改文件")
+    mi.add_argument("--force", action="store_true", help="现有配置含注释 / 尾随逗号时，先备份再重写为纯 JSON")
+    mi.add_argument("--json", action="store_true")
 
     e = sub.add_parser("export", help="把切片渲成可发布成片（9:16 / 烧字幕 / 标题卡）")
     e.add_argument("project_id")
