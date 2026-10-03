@@ -21,6 +21,7 @@ class Config:
     max_per_day: int = 3
     privacy: str = "private"
     keep_days: int = 7
+    cookies_file: Path | None = None
 
 
 def _parse_int(raw: str | None, default: int) -> int:
@@ -33,6 +34,7 @@ def _parse_int(raw: str | None, default: int) -> int:
 def load_config(env: dict | None = None) -> Config:
     src = env if env is not None else os.environ
     data_dir_raw = src.get("AUTOCLIP_DATA_DIR", "~/.local/share/AutoClip")
+    cookies_raw = (src.get("AUTO_SH_COOKIES_FILE", "") or "").strip()
     return Config(
         yt_api_key=src.get("YT_API_KEY", ""),
         llm_provider=src.get("LLM_PROVIDER", ""),
@@ -42,6 +44,7 @@ def load_config(env: dict | None = None) -> Config:
         max_per_day=_parse_int(src.get("AUTO_SH_MAX_PER_DAY"), 3),
         privacy=src.get("AUTO_SH_PRIVACY", "private"),
         keep_days=_parse_int(src.get("AUTO_SH_KEEP_DAYS"), 7),
+        cookies_file=Path(cookies_raw).expanduser() if cookies_raw else None,
     )
 
 

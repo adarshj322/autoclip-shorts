@@ -25,7 +25,7 @@ def _setup_ok_pipeline(monkeypatch, tmp_path, clip_title="My Clip Title"):
                            "channel": "C", "duration_sec": 1200,
                            "view_count": 1, "url": url}])
 
-    def fake_download(video_url, work_dir, runner=None):
+    def fake_download(video_url, work_dir, runner=None, cookies_file=None):
         d = Path(work_dir)
         d.mkdir(parents=True, exist_ok=True)
         (d / "v1.mp4").write_bytes(b"x")

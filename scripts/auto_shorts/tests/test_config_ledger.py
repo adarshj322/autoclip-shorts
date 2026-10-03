@@ -9,3 +9,12 @@ def test_validate_missing_keys_and_ledger_roundtrip(tmp_path):
     mark_result(d, "abc", {"status": "published"})
     save_ledger(p, d)
     assert is_seen(load_ledger(p), "abc") is True
+
+
+def test_cookies_file_env_loading(tmp_path):
+    from pathlib import Path
+    from scripts.auto_shorts.config import load_config
+    assert load_config(env={}).cookies_file is None
+    cfg = load_config(env={"AUTO_SH_COOKIES_FILE": str(tmp_path / "c.txt")})
+    assert cfg.cookies_file == Path(tmp_path / "c.txt")
+    assert load_config(env={"AUTO_SH_COOKIES_FILE": "  "}).cookies_file is None

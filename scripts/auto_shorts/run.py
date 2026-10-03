@@ -48,6 +48,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Override AUTO_SH_KEEP_DAYS for raw-download cleanup.")
     p.add_argument("--workdir", default=None,
                    help="Base dir for ledger/work dirs (default: data_dir).")
+    p.add_argument("--cookies-file", default=None,
+                   help="Netscape cookies.txt for yt-dlp (overrides AUTO_SH_COOKIES_FILE).")
     return p.parse_args(argv)
 
 
@@ -134,6 +136,14 @@ def main(argv: list[str] | None = None) -> int:
                "processed": [], "skipped": []})
         return 2
 
+    cookies_file = (Path(args.cookies_file).expanduser()
+                    if args.cookies_file else cfg.cookies_file)
+    if cookies_file is not None and not cookies_file.is_file():
+        _emit({"ok": False,
+               "error": f"cookies file not readable: {cookies_file}",
+               "processed": [], "skipped": []})
+        return 2
+
     base.mkdir(parents=True, exist_ok=True)
     try:
         _lock = _acquire_lock(base)
@@ -191,7 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"processing {vid}: {video.get('title', '')}")
 
         try:
-            dl = download_mod.download_video(url, work_dir)
+            dl = download_mod.download_video(url, work_dir,
+                                             cookies_file=cookies_file)
         except (download_mod.DownloadSkipped, download_mod.DownloadError) as e:
             skipped.append({"video_id": vid, "reason": str(e)})
             ledger_mod.mark_result(data, vid, {"status": "skipped",

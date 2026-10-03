@@ -23,7 +23,7 @@ def _mock_pipeline(monkeypatch, tmp_path, run_payload):
                            "duration_sec": 1200, "view_count": 1,
                            "url": "https://www.youtube.com/watch?v=vbad"}])
 
-    def fake_download(url, work_dir, runner=None):
+    def fake_download(url, work_dir, runner=None, cookies_file=None):
         d = tmp_path / "work" / "vbad"
         d.mkdir(parents=True, exist_ok=True)
         (d / "vbad.mp4").write_bytes(b"x")
@@ -80,3 +80,19 @@ def test_missing_clip_id_skips_cleanly(tmp_path, monkeypatch, capsys):
     assert summary["skipped"][0]["video_id"] == "vbad"
     assert summary["skipped"][0]["reason"].startswith(
         "export_failed: missing project_id/clip_id")
+
+
+def test_missing_cookies_file_is_config_error(tmp_path, monkeypatch, capsys):
+    import json
+    from scripts.auto_shorts import run
+    monkeypatch.setenv("YT_API_KEY", "k")
+    monkeypatch.setenv("LLM_PROVIDER", "x")
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "k")
+    monkeypatch.setenv("UPLOAD_POST_USER", "u")
+    rc = run.main(["--dry-run", "--max-per-day", "1",
+                   "--workdir", str(tmp_path),
+                   "--cookies-file", str(tmp_path / "nope.txt")])
+    summary = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert summary["ok"] is False
+    assert "cookies" in summary["error"]

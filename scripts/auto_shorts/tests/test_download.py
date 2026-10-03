@@ -24,3 +24,22 @@ def test_success_returns_paths(tmp_path):
     out = download_video("https://youtube.com/watch?v=abc123", work, runner=ok)
     assert out["video_path"].endswith(".mp4")
     assert out["srt_path"] is not None and out["srt_path"].endswith(".srt")
+
+
+def test_cookies_file_forwarded_to_cmd(tmp_path):
+    from scripts.auto_shorts.download import download_video
+    work = tmp_path / "work"
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    seen = {}
+    def ok(cmd, *a, **k):
+        seen["cmd"] = cmd
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "abc123.mp4").write_bytes(b"\x00" * 16)
+        class R: returncode = 0; stderr = ""; stdout = ""
+        return R()
+    out = download_video("https://youtube.com/watch?v=abc123", work,
+                         runner=ok, cookies_file=cookies)
+    assert out["video_path"].endswith(".mp4")
+    assert "--cookies" in seen["cmd"]
+    assert str(cookies) in seen["cmd"]

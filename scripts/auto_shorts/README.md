@@ -27,6 +27,11 @@ Copy `env.example`. Orchestrator keys (validated, exit 2 when missing):
 - `AUTOCLIP_DATA_DIR` (default `~/.local/share/AutoClip`)
 - `AUTO_SH_MAX_PER_DAY` (default `3`), `AUTO_SH_PRIVACY`
   (`private|unlisted`), `AUTO_SH_KEEP_DAYS` (default `7`)
+- `AUTO_SH_COOKIES_FILE` (optional, empty = off): path to a Netscape
+  `cookies.txt` exported from your logged-in browser. Passed to yt-dlp as
+  `--cookies` to defeat 429/bot-checks on VPS IPs. Missing/unreadable file
+  is a config error (exit 2). Overridable per run with `--cookies-file`.
+  Guard the file (`chmod 600`) — it holds a live login session.
 
 `API_*` passthrough: `API_DASHSCOPE_API_KEY`, `API_MODEL_NAME`,
 `AUTOCLIP_YT_SUBTITLE_LANGS` (and friends like `AUTOCLIP_YT_CLIENT`) are

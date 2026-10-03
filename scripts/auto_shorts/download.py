@@ -88,12 +88,13 @@ def _find_outputs(work_dir: Path) -> dict:
     }
 
 
-def download_video(url: str, work_dir: Path, runner=None) -> dict:
+def download_video(url: str, work_dir: Path, runner=None,
+                   cookies_file: Path | None = None) -> dict:
     """Download ``url`` into ``work_dir``; return ``{"video_path", "srt_path"}``."""
     run = runner or _default_runner
     Path(work_dir).mkdir(parents=True, exist_ok=True)
 
-    cmd = build_ytdlp_cmd(url, Path(work_dir))
+    cmd = build_ytdlp_cmd(url, Path(work_dir), cookies_file=cookies_file)
     last = None
     for wait in _BACKOFF_SECS:
         last = run(cmd)
