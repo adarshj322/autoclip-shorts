@@ -40,6 +40,7 @@ check_build_tools
 prepare_portable_python
 install_backend_deps
 copy_backend_source
+prepare_optional_runtime_wheels
 verify_backend_deps
 
 # ---- ffmpeg ----
@@ -70,6 +71,10 @@ build_frontend
 # declares resources/{python,backend,ffmpeg} and restricts targets to nsis.
 echo "==> Building Tauri application (this takes a few minutes)"
 (cd src-tauri && cargo tauri build --bundles nsis)
+
+# CI has Visual C++ installed; inspect the actual exe before it can hide missing DLLs.
+"$PORTABLE_PY" -B scripts/windows_desktop_crt.py --exe src-tauri/target/release/autoclip-desktop.exe \
+    --report src-tauri/target/release/desktop-crt.json
 
 APP_VERSION="$(app_version)"
 NSIS_DIR="src-tauri/target/release/bundle/nsis"
