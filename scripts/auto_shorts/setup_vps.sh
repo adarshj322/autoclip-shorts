@@ -80,11 +80,25 @@ if [ -z "${YT_API_KEY:-}" ] || [ -z "${UPLOAD_POST_API_KEY:-}" ]; then
 fi
 
 # ------------------------------------------------------- 5. preflight (keys)
+# Gate: doctor must pass and the dry-run must not report a CONFIG error
+# (exit 2). A partial dry-run (exit 1, e.g. a transiently skipped video)
+# still proceeds to cron setup; config errors stop here with the log path.
 export PATH="$INSTALL_DIR/venv/bin:$PATH"
+DRYRUN_LOG="$INSTALL_DIR/logs/setup-dryrun.log"
+mkdir -p "$INSTALL_DIR/logs"
 log "running autoclip doctor"
-"$VENV/bin/autoclip" doctor
+if ! "$VENV/bin/autoclip" doctor 2>&1 | tee "$DRYRUN_LOG"; then
+    die "autoclip doctor preflight failed (full output in $DRYRUN_LOG) — cron NOT installed. Fix the error and re-run this script."
+fi
 log "running one dry-run (downloads/clips/exports, never publishes)"
-"$VENV/bin/python" -m scripts.auto_shorts.run --dry-run --max-per-day 1
+set +e
+"$VENV/bin/python" -m scripts.auto_shorts.run --dry-run --max-per-day 1 >>"$DRYRUN_LOG" 2>&1
+dry_rc=$?
+set -e
+if [ "$dry_rc" -eq 2 ]; then
+    die "dry-run preflight failed with a config error (exit 2; full output in $DRYRUN_LOG) — cron NOT installed. Fix the error and re-run this script."
+fi
+log "dry-run exit $dry_rc (0 = clean, 1 = partial with transient skips); proceeding to cron setup"
 
 # ------------------------------------------------------------------ 6. cron
 cron_line="0 9 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd $INSTALL_DIR && set -a && source .env.auto_shorts && set +a && export PATH=\"$INSTALL_DIR/venv/bin:\$PATH\" && venv/bin/python -m scripts.auto_shorts.run' >> $INSTALL_DIR/logs/auto_shorts.log 2>&1 $CRON_MARK"
