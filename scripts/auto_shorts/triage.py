@@ -13,8 +13,11 @@ the network or a model — same pattern as ``download.py``.
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
+
+from scripts.auto_shorts._util import SENT_END_RE as _SENT_END_RE
+from scripts.auto_shorts._util import run as _default_runner
+from scripts.auto_shorts._util import to_float as _to_float
 
 QUALIFYING_SCORE = 70
 MIN_CLIPS = 2
@@ -32,20 +35,6 @@ _LEX_PIVOTS = ("but", "however", "although", "though", "instead",
 _TS_RE = re.compile(
     r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)"
 )
-_SENT_END_RE = re.compile(r"[.!?\u3002\uff01\uff1f]['\"\u201d)]?\s*$")
-
-
-def _default_runner(cmd: list[str]):
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-
-def _to_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def fetch_subtitles(
     video_id: str,
     work_dir: Path,
@@ -202,33 +191,19 @@ def score_video(video: dict, srt_path: Path, llm_fn) -> dict:
     keep = _preranked_indices(chunked)
     scored: list[dict] = []
     for i, w in enumerate(chunked):
+        base = {"start": w["start"], "end": w["end"], "text": w["text"]}
         if i not in keep:
-            scored.append(
-                {
-                    "start": w["start"],
-                    "end": w["end"],
-                    "text": w["text"],
-                    "score": 0.0,
-                    "hook": "",
-                    "reason": "pre-rank capped",
-                }
-            )
+            scored.append({**base, "score": 0.0, "hook": "",
+                           "reason": "pre-rank capped"})
             continue
         try:
             res = llm_fn(f"Score this clip transcript 0-100 as JSON "
                          f"{{score, hook, reason}}:\n{w['text']}") or {}
         except Exception:
             res = {}
-        scored.append(
-            {
-                "start": w["start"],
-                "end": w["end"],
-                "text": w["text"],
-                "score": _to_float(res.get("score")),
-                "hook": str(res.get("hook", "")),
-                "reason": str(res.get("reason", "")),
-            }
-        )
+        scored.append({**base, "score": _to_float(res.get("score")),
+                       "hook": str(res.get("hook", "")),
+                       "reason": str(res.get("reason", ""))})
     return {
         "video_id": video.get("video_id", ""),
         "windows": scored,

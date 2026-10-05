@@ -1,7 +1,7 @@
 """Clip runner wrapper for the auto-shorts VPS pipeline.
 
 Stdlib + subprocess only. Wraps ``autoclip run <video> [--srt] --min-score <v>
---json`` and picks the top-scoring clip. The orchestrator (Task 6) runs the
+--json`` and picks the top-scoring clip. The orchestrator runs the
 command, feeds stdout JSON through :func:`parse_run_json`, then
 :func:`pick_top_clip`; on ``None`` it retries once with ``min_score=0.4``
 and skips the video if still empty.
@@ -9,8 +9,10 @@ and skips the video if still empty.
 
 from __future__ import annotations
 
-import subprocess
+import json
 from pathlib import Path
+
+from scripts.auto_shorts._util import run as _run_cmd
 
 DEFAULT_MIN_SCORE = 0.5
 RETRY_MIN_SCORE = 0.4
@@ -62,13 +64,10 @@ def run_and_parse(video: Path, srt: Path | None, min_score: float = DEFAULT_MIN_
     """Run ``autoclip run --json`` via ``runner`` and parse stdout JSON.
 
     ``runner(cmd)`` must return an object with ``returncode``/``stdout``/
-    ``stderr`` (defaults to :func:`subprocess.run`). Raises
-    ``RuntimeError`` on non-zero exit. JSON decoding needs ``json`` --
-    imported lazily to keep module import side-effect free.
+    ``stderr`` (defaults to shared :func:`_run_cmd`). Raises
+    ``RuntimeError`` on non-zero exit.
     """
-    import json
-
-    run = runner or (lambda cmd: subprocess.run(cmd, capture_output=True, text=True, check=False))
+    run = runner or _run_cmd
     cmd = build_run_cmd(video, srt, min_score)
     result = run(cmd)
     if result.returncode != 0:

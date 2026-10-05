@@ -2,13 +2,15 @@
 
 Stdlib + subprocess only. Wraps ``autoclip export`` / ``autoclip publish``
 for the top clip picked by :func:`clip.pick_top_clip`. The orchestrator
-(Task 6) exports with the ``shorts`` preset, then publishes to YouTube as
+exports with the ``shorts`` preset, then publishes to YouTube as
 private and detects ``skipped=true`` in the publish JSON.
 """
 
 from __future__ import annotations
 
-import subprocess
+import json
+
+from scripts.auto_shorts._util import run as _run_cmd
 
 EXPORT_PRESET = "shorts"
 YOUTUBE_TITLE_LIMIT = 100
@@ -81,13 +83,11 @@ def run_and_parse(cmd: list[str], runner=None) -> dict:
     """Run an export/publish ``cmd`` via ``runner`` and parse stdout JSON.
 
     ``runner(cmd)`` must return an object with ``returncode``/``stdout``/
-    ``stderr`` (defaults to :func:`subprocess.run`). Raises
+    ``stderr`` (defaults to shared :func:`_run_cmd`). Raises
     ``RuntimeError`` on non-zero exit and :class:`PublishSkipped` when the
     JSON payload reports ``skipped=true``.
     """
-    import json
-
-    run = runner or (lambda c: subprocess.run(c, capture_output=True, text=True, check=False))
+    run = runner or _run_cmd
     result = run(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"autoclip command failed {' '.join(cmd)}: {(getattr(result, 'stderr', '') or '').strip()}")

@@ -49,7 +49,6 @@ _HOOK_EN = ("why", "how", "secret", "shocking", "stop", "wait", "watch",
             "mistake")
 _HOOK_CJK = ("千万", "竟然", "震惊", "注意", "揭秘", "为什么", "如何",
              "免费", "警告", "真相", "千万别")
-HOOK_KEYWORDS = frozenset(_HOOK_EN + _HOOK_CJK)
 _HOOK_EN_RE = re.compile(r"\b(?:" + "|".join(_HOOK_EN) + r")\b")
 
 DISK_MIN_BYTES = 5 * 1024**3
@@ -84,6 +83,14 @@ def _log(msg: str) -> None:
 
 def _emit(summary: dict) -> None:
     print(json.dumps(summary))
+
+
+def _fail(msg: str, code: int, processed: list | None = None,
+          skipped: list | None = None) -> int:
+    """Emit the standard error summary; every early exit goes through here."""
+    _emit({"ok": False, "error": msg,
+           "processed": processed or [], "skipped": skipped or []})
+    return code
 
 
 def _now_iso() -> str:
@@ -147,19 +154,22 @@ def _doctor_ok() -> tuple[bool, str]:
 
 
 def _llm_fn(prompt: str) -> dict:
-    """Score a transcript window via the DashScope OpenAI-compatible API.
+    """Score a transcript window via any OpenAI-compatible chat API.
 
-    Stdlib urllib only; keys come from the existing ``API_DASHSCOPE_API_KEY``
-    / ``API_MODEL_NAME`` passthrough env. Any failure returns {} so the
-    window scores 0 and the triage gate skips the video instead of crashing
-    the run. Non-dashscope ``LLM_PROVIDER`` values are not scored here.
+    Stdlib urllib only. Endpoint comes from ``OPENAI_BASE_URL`` (any
+    OpenAI-compatible service: OpenRouter, vLLM, Ollama, DashScope's
+    compatible mode) with the key from ``API_OPENAI_API_KEY`` falling
+    back to ``API_DASHSCOPE_API_KEY``; model from ``API_MODEL_NAME``.
+    Any failure returns {} so the window scores 0 and the triage gate
+    skips the video instead of crashing the run.
     """
     import os
     import urllib.request
 
-    if os.environ.get("LLM_PROVIDER", "") != "dashscope":
-        return {}
-    api_key = os.environ.get("API_DASHSCOPE_API_KEY", "")
+    base = (os.environ.get("OPENAI_BASE_URL", "")
+            or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+    api_key = (os.environ.get("API_OPENAI_API_KEY", "")
+               or os.environ.get("API_DASHSCOPE_API_KEY", ""))
     model = os.environ.get("API_MODEL_NAME", "qwen-plus")
     if not api_key:
         return {}
@@ -169,7 +179,7 @@ def _llm_fn(prompt: str) -> dict:
         "response_format": {"type": "json_object"},
     }).encode("utf-8")
     req = urllib.request.Request(
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        f"{base}/chat/completions",
         data=body,
         headers={"Authorization": f"Bearer {api_key}",
                  "Content-Type": "application/json"},
@@ -267,17 +277,12 @@ def main(argv: list[str] | None = None) -> int:
 
     errors = config_mod.validate_config(cfg)
     if errors:
-        _emit({"ok": False, "error": f"missing/invalid config: {', '.join(errors)}",
-               "processed": [], "skipped": []})
-        return 2
+        return _fail(f"missing/invalid config: {', '.join(errors)}", 2)
 
     cookies_file = (Path(args.cookies_file).expanduser()
                     if args.cookies_file else cfg.cookies_file)
     if cookies_file is not None and not cookies_file.is_file():
-        _emit({"ok": False,
-               "error": f"cookies file not readable: {cookies_file}",
-               "processed": [], "skipped": []})
-        return 2
+        return _fail(f"cookies file not readable: {cookies_file}", 2)
 
     base.mkdir(parents=True, exist_ok=True)
     try:
@@ -289,36 +294,27 @@ def main(argv: list[str] | None = None) -> int:
 
     ok, msg = _doctor_ok()
     if not ok:
-        _emit({"ok": False, "error": msg, "processed": [], "skipped": []})
-        return 1
+        return _fail(msg, 1)
 
     try:
         free = shutil.disk_usage(base).free
     except OSError as e:
-        _emit({"ok": False, "error": f"disk check failed: {e}",
-               "processed": [], "skipped": []})
-        return 1
+        return _fail(f"disk check failed: {e}", 1)
     if free < DISK_MIN_BYTES:
-        _emit({"ok": False,
-               "error": f"disk full: {free} bytes free, need {DISK_MIN_BYTES}",
-               "processed": [], "skipped": []})
-        return 1
+        return _fail(f"disk full: {free} bytes free, need {DISK_MIN_BYTES}", 1)
 
     ledger_path = base / LEDGER_NAME
     try:
         data = ledger_mod.load_ledger(ledger_path)
     except (OSError, ValueError) as e:
-        _emit({"ok": False, "error": f"ledger load failed: {e}",
-               "processed": [], "skipped": []})
-        return 1
+        return _fail(f"ledger load failed: {e}", 1)
     seen = set((data.get("seen") or {}).keys())
 
     try:
         candidates = discover_mod.discover_trending(
             cfg.yt_api_key, max_results=DISCOVER_MAX_RESULTS)
     except discover_mod.DiscoveryError as e:
-        _emit({"ok": False, "error": str(e), "processed": [], "skipped": []})
-        return 1
+        return _fail(str(e), 1)
 
     allow = _read_channel_list(base / "allowlist_channels.txt")
     block = _read_channel_list(base / "blocklist.txt") or set()
@@ -459,9 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ledger_mod.save_ledger(ledger_path, data)
     except OSError as e:
-        _emit({"ok": False, "error": f"ledger save failed: {e}",
-               "processed": processed, "skipped": skipped})
-        return 1
+        return _fail(f"ledger save failed: {e}", 1, processed, skipped)
 
     _cleanup_old_dirs(work_root, cfg.keep_days)
 

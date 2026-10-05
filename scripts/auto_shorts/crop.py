@@ -16,7 +16,10 @@ untracked), vstacked halves for split. Relative boxes are clamped to
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
+
+from scripts.auto_shorts._util import to_float as _to_float
 
 EMA_ALPHA = 0.15
 DETECT_HEIGHT = 480
@@ -30,13 +33,6 @@ _FPS_PROP = 5
 _WIDTH_PROP = 3
 _HEIGHT_PROP = 4
 _POS_PROP = 1
-
-
-def _to_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _clamp01(value) -> float:
@@ -199,7 +195,6 @@ def interpolate_boxes(boxes: list[dict], t: float) -> tuple[float, float, float,
 def _dwell_values(boxes: list[dict], duration: float, t0: float = 0.0,
                   dwell: float = DWELL_SEC) -> list[float]:
     """Face-center-x per dwell step over ``[t0, t0+duration)`` (clip clock)."""
-    import math
     n = max(1, math.ceil(max(duration, 0.0) / dwell))
     out = []
     for k in range(n):

@@ -7,8 +7,12 @@ Secrets are read from the environment only and never committed.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _default_data_dir() -> Path:
+    return Path("~/.local/share/AutoClip").expanduser()
 
 
 @dataclass
@@ -17,7 +21,7 @@ class Config:
     llm_provider: str = ""
     upload_post_key: str = ""
     upload_post_user: str = ""
-    data_dir: Path = Path("~/.local/share/AutoClip").expanduser()
+    data_dir: Path = field(default_factory=_default_data_dir)
     max_per_day: int = 3
     privacy: str = "private"
     keep_days: int = 7

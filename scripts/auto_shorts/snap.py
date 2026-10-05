@@ -8,7 +8,7 @@ Silence edges are inter-word gaps in the ``0.3-0.5s`` band
 (``SILENCE_MIN_GAP_SEC``..``SILENCE_MAX_GAP_SEC``) from the
 word-timestamped list — no separate VAD call. Per edge the largest in-band
 gap wins (a long dialogue pause is a scene break, not a cut point). Scene-cut anchoring uses the
-``scene_cuts`` timestamps passed in (Task 4 wires the producer via
+``scene_cuts`` timestamps passed in (wired by the orchestrator via
 :func:`scene_cuts`); a cut within +/- ``SCENE_SNAP_SEC`` of an edge wins.
 The hook (start) is never moved earlier by the tail clamp — over-long
 windows clamp the tail to ``ns + MAX_DUR_SEC``.
@@ -16,13 +16,15 @@ windows clamp the tail to ``ns + MAX_DUR_SEC``.
 ``snap_window`` is pure (no network, no ffmpeg); only :func:`scene_cuts`
 touches the video file, and it returns [] on any failure so snapping
 proceeds without scene anchoring. Moves larger than ``SNAP_MOVE_LIMIT_SEC``
-flag the window for skip by the caller (Task 4).
+flag the window for skip by the caller.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
+
+from scripts.auto_shorts._util import SENT_END_RE as _SENT_END_RE
+from scripts.auto_shorts._util import to_float as _to_float
 
 SNAP_MOVE_LIMIT_SEC = 2.0
 SILENCE_MIN_GAP_SEC = 0.3
@@ -31,24 +33,10 @@ SCENE_SNAP_SEC = 1.0
 MAX_DUR_SEC = 60.0
 _EDGE_SEARCH_SEC = 2.0
 
-_SENT_END_RE = re.compile(r"[.!?\u3002\uff01\uff1f]['\"\u201d)]?\s*$")
-
-
-def _to_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
 
 def _valid_cut(value) -> float | None:
     """Parse a scene-cut timestamp; None when unparseable (never coerce to 0.0)."""
-    if isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return None if isinstance(value, bool) else _to_float(value, None)
 
 
 def _words_sorted(words: list[dict]) -> list[dict]:

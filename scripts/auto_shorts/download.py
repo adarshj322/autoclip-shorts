@@ -14,9 +14,10 @@ with ``--extractor-args youtube:player_client=android`` is made when the
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 from pathlib import Path
+
+from scripts.auto_shorts._util import run as _default_runner
 
 FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
 ANDROID_EXTRACTOR_ARGS = "youtube:player_client=android"
@@ -54,10 +55,6 @@ def build_ytdlp_cmd(
         cmd += ["--cookies", str(cookies_file)]
     cmd.append(url)
     return cmd
-
-
-def _default_runner(cmd: list[str]):
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
 def _is_rate_limited(result) -> bool:

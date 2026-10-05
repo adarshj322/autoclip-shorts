@@ -258,3 +258,41 @@ def test_hook_keywords_need_word_boundaries():
                 "a brand new day awaits",
                 "how does this work"):
         assert _hook_pass(wins(hit), 0.0) is True
+
+
+def test_llm_fn_openai_compatible_endpoint(monkeypatch):
+    import json as _json
+    import urllib.request
+    from scripts.auto_shorts import run as run_mod
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setenv("API_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("API_MODEL_NAME", "m")
+    monkeypatch.delenv("API_DASHSCOPE_API_KEY", raising=False)
+    seen = {}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps({"choices": [{"message": {"content": _json.dumps({"score": 80})}}]}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["auth"] = req.headers.get("Authorization")
+        return FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert run_mod._llm_fn("hello") == {"score": 80}
+    assert seen["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert seen["auth"] == "Bearer sk-test"
+
+
+def test_llm_fn_no_key_scores_zero(monkeypatch):
+    from scripts.auto_shorts import run as run_mod
+    monkeypatch.delenv("API_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("API_DASHSCOPE_API_KEY", raising=False)
+    assert run_mod._llm_fn("hello") == {}
