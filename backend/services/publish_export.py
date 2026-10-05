@@ -45,7 +45,7 @@ class ExportRequest:
     preset: str = "douyin"
     subtitles: bool = True
     title_card: bool = True
-    layout: Optional[str] = None  # 覆盖预设：blur / crop / fit / none
+    layout: Optional[str] = None  # 覆盖预设：blur / crop / fit / none / track / split
     brand_outro: bool = False
 
 
@@ -170,9 +170,47 @@ def blurred_backdrop(w: int, h: int) -> str:
             f"colorlevels=romax=0.35:gomax=0.35:bomax=0.35,scale={w}:{h}")
 
 
-def _layout_filters(layout: str, w: Optional[int], h: Optional[int]) -> List[str]:
+def _tracked_parts(layout: str, w: int, h: int, boxes=None,
+                   clip_start: float = 0.0, clip_duration: float = 0.0) -> List[str] | None:
+    """Box-driven 9:16 filters for the auto-shorts ``shorts`` preset.
+
+    ``track`` follows interpolated face boxes with dwell quantization
+    (center fallback when untracked); ``split`` stacks top/bottom halves.
+    Returns None when the crop helpers are unavailable so the caller can
+    fall back to the static ``crop`` layout — always filtered, never silent.
+    """
+    try:
+        from scripts.auto_shorts import crop as crop_mod
+    except ImportError:
+        return None
+    try:
+        if layout == "split":
+            return list(crop_mod.split_filter(w, h))
+        if layout == "track":
+            return [f"[0:v]{crop_mod.track_filter(boxes or [], clip_duration, w, h, t0=clip_start)}[base]"]
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _layout_filters(layout: str, w: Optional[int], h: Optional[int], boxes=None,
+                     clip_start: float = 0.0, clip_duration: float = 0.0) -> List[str]:
     if layout == "none" or not w or not h:
         return []
+    if layout in ("track", "split"):
+        parts = _tracked_parts(layout, w, h, boxes, clip_start, clip_duration)
+        if parts:
+            return parts
+        if layout == "split":
+            # Static stacked fallback (same geometry, no tracking needed).
+            half = h // 2
+            return [
+                "[0:v]split=2[sh_a][sh_b]",
+                f"[sh_a]crop=iw:ih/2:0:0,scale={w}:{half}[sh_t]",
+                f"[sh_b]crop=iw:ih/2:0:ih/2,scale={w}:{half}[sh_btm]",
+                "[sh_t][sh_btm]vstack=inputs=2[base]",
+            ]
+        return [f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}[base]"]
     if layout == "blur":
         return [
             f"[0:v]split=2[bg][fg]",
@@ -226,9 +264,10 @@ def portrait_subtitle_style(style: str, factor: float = 0.47) -> str:
 
 
 def _build_filter(req: ExportRequest, spec: Dict[str, Any], srt_path: Optional[Path],
-                  title_path: Optional[Path], font: Optional[Path], subtitle_style: str = "clean") -> Optional[str]:
+                  title_path: Optional[Path], font: Optional[Path], subtitle_style: str = "clean",
+                  boxes=None, clip_start: float = 0.0, clip_duration: float = 0.0) -> Optional[str]:
     layout = req.layout or spec["layout"]
-    parts = _layout_filters(layout, spec.get("w"), spec.get("h"))
+    parts = _layout_filters(layout, spec.get("w"), spec.get("h"), boxes, clip_start, clip_duration)
     last = "base" if parts else "0:v"
     if srt_path is not None:
         style = SUBTITLE_STYLES.get(subtitle_style, SUBTITLE_STYLES["clean"])
@@ -253,6 +292,25 @@ def _build_filter(req: ExportRequest, spec: Dict[str, Any], srt_path: Optional[P
     # 最后一条没有输出标签时 ffmpeg 也能用，但我们都打了标签：把最后标签接到默认输出
     # filter_complex 最后一个 [tag] 需要 map
     return ";".join(parts), last
+
+
+def _track_boxes_for(req: ExportRequest, spec: Dict[str, Any], video: Path,
+                     start: float, duration: float):
+    """Face boxes for ``track``/``split`` layouts; None otherwise or on failure.
+
+    Lazily imports the auto-shorts crop helpers (cv2/mediapipe stay
+    optional); any failure degrades to the static center/stack fallback in
+    :func:`_layout_filters` — export never fails because of tracking.
+    """
+    if (req.layout or spec.get("layout")) not in ("track", "split"):
+        return None
+    try:
+        from scripts.auto_shorts import crop as crop_mod
+        if (req.layout or spec.get("layout")) == "split":
+            return []
+        return crop_mod.track_boxes(video, start, start + duration)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def export_clip(req: ExportRequest) -> Dict[str, Any]:
@@ -332,7 +390,9 @@ def export_clip(req: ExportRequest) -> Dict[str, Any]:
             title_file = tmpdir / "title.txt"
             title_file.write_text(title[:40], encoding="utf-8")
 
-        built = _build_filter(req, spec, srt_file, title_file if req.title_card else None, font)
+        built = _build_filter(req, spec, srt_file, title_file if req.title_card else None, font,
+                              boxes=_track_boxes_for(req, spec, video, start, duration),
+                              clip_start=start, clip_duration=duration)
         ffmpeg = get_ffmpeg_path()
         temp_output = tmpdir / 'content.mp4'
         from backend.services import render_limits

@@ -4,6 +4,30 @@ def test_dry_run_and_idempotent(tmp_path, monkeypatch):
     assert run.main(argv) in (0, 1, 2)
 
 
+def _mock_triage_ok(monkeypatch, tmp_path, hook="wait, this changes everything",
+                    score=90):
+    """Mock triage fetch (writes a small EN srt) + run._llm_fn scoring."""
+    from pathlib import Path
+
+    from scripts.auto_shorts import run as run_mod
+    from scripts.auto_shorts import triage as triage_mod
+
+    def fake_fetch(video_id, work_dir, langs="zh-Hans,zh,en", runner=None):
+        d = Path(work_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        srt = d / f"{video_id}.en.srt"
+        srt.write_text(
+            "1\n00:00:00,000 --> 00:00:45,000\n"
+            + ("hello world voice talking content here now " * 60) + "\n",
+            encoding="utf-8")
+        return srt
+
+    monkeypatch.setattr(triage_mod, "fetch_subtitles", fake_fetch)
+    monkeypatch.setattr(
+        run_mod, "_llm_fn",
+        lambda prompt: {"score": score, "hook": hook, "reason": "t"})
+
+
 def _mock_pipeline(monkeypatch, tmp_path, run_payload):
     """Mock doctor/discover/download/clip/export; export must never run."""
     import subprocess
@@ -11,6 +35,8 @@ def _mock_pipeline(monkeypatch, tmp_path, run_payload):
     from scripts.auto_shorts import discover as discover_mod
     from scripts.auto_shorts import download as download_mod
     from scripts.auto_shorts import export_publish as export_mod
+
+    _mock_triage_ok(monkeypatch, tmp_path)
 
     monkeypatch.setenv("YT_API_KEY", "k")
     monkeypatch.setenv("LLM_PROVIDER", "x")
@@ -96,3 +122,122 @@ def test_missing_cookies_file_is_config_error(tmp_path, monkeypatch, capsys):
     assert rc == 2
     assert summary["ok"] is False
     assert "cookies" in summary["error"]
+
+
+def test_hook_veto_skips_hookless_clip(tmp_path, monkeypatch, capsys):
+    import json
+    from scripts.auto_shorts import run
+    # _mock_pipeline with a top clip whose first 3s are throat-clearing
+    # (hook score 0 / hook text empty) → skipped with reason hook_failed
+    _mock_triage_ok(monkeypatch, tmp_path, hook="", score=85)
+    import subprocess
+    from scripts.auto_shorts import clip as clip_mod
+    from scripts.auto_shorts import discover as discover_mod
+    from scripts.auto_shorts import download as download_mod
+    from scripts.auto_shorts import export_publish as export_mod
+    monkeypatch.setenv("YT_API_KEY", "k")
+    monkeypatch.setenv("LLM_PROVIDER", "x")
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "k")
+    monkeypatch.setenv("UPLOAD_POST_USER", "u")
+    monkeypatch.setattr(
+        discover_mod, "discover_trending",
+        lambda *a, **k: [{"video_id": "vhook", "title": "T", "channel": "C",
+                           "duration_sec": 1200, "view_count": 1,
+                           "url": "https://www.youtube.com/watch?v=vhook"}])
+
+    def fake_download(url, work_dir, runner=None, cookies_file=None):
+        from pathlib import Path
+        d = Path(work_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "vhook.mp4").write_bytes(b"x")
+        return {"video_path": str(d / "vhook.mp4"), "srt_path": None}
+
+    monkeypatch.setattr(download_mod, "download_video", fake_download)
+    monkeypatch.setattr(
+        clip_mod, "run_and_parse",
+        lambda *a, **k: {"project_id": "p1", "clips": [
+            {"id": "c1", "title": "um uh so like you know", "score_100": 95}]})
+
+    def boom(cmd, runner=None):
+        raise AssertionError("export must not run on hook veto")
+
+    monkeypatch.setattr(export_mod, "run_and_parse", boom)
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
+    rc = run.main(["--dry-run", "--max-per-day", "1",
+                   "--workdir", str(tmp_path)])
+    summary = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert any(s["reason"].startswith("hook_") for s in summary["skipped"])
+
+
+def test_unfetchable_subtitles_skips_video(tmp_path, monkeypatch, capsys):
+    import json
+    from scripts.auto_shorts import run
+    from scripts.auto_shorts import triage as triage_mod
+    # _mock_pipeline with triage returning a video whose subtitles cannot
+    # be fetched → skipped with reason no_subtitles, never downloaded
+    import subprocess
+    from scripts.auto_shorts import discover as discover_mod
+    from scripts.auto_shorts import download as download_mod
+    monkeypatch.setenv("YT_API_KEY", "k")
+    monkeypatch.setenv("LLM_PROVIDER", "x")
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "k")
+    monkeypatch.setenv("UPLOAD_POST_USER", "u")
+    monkeypatch.setattr(
+        discover_mod, "discover_trending",
+        lambda *a, **k: [{"video_id": "vnosub", "title": "T", "channel": "C",
+                           "duration_sec": 1200, "view_count": 1,
+                           "url": "https://www.youtube.com/watch?v=vnosub"}])
+    monkeypatch.setattr(triage_mod, "fetch_subtitles", lambda *a, **k: None)
+    downloaded = []
+
+    def fake_download(url, work_dir, runner=None, cookies_file=None):
+        downloaded.append(url)
+        raise AssertionError("download must not run without subtitles")
+
+    monkeypatch.setattr(download_mod, "download_video", fake_download)
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
+    rc = run.main(["--dry-run", "--max-per-day", "1",
+                   "--workdir", str(tmp_path)])
+    summary = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert downloaded == []
+    assert any(s["reason"] == "no_subtitles" for s in summary["skipped"])
+
+
+def test_hook_pass_hook_field_keyword_and_empty():
+    from scripts.auto_shorts.run import _hook_pass
+    wins = [{"start": 0.0, "end": 45.0, "text": "hello world",
+             "score": 85, "hook": "wait for it", "reason": "t"}]
+    assert _hook_pass(wins, 0.0) is True
+    wins_kw = [{"start": 0.0, "end": 45.0, "text": "why this works",
+                "score": 85, "hook": "", "reason": "t"}]
+    assert _hook_pass(wins_kw, 0.0) is True
+    wins_throat = [{"start": 0.0, "end": 45.0,
+                    "text": "um uh so like you know well",
+                    "score": 85, "hook": "", "reason": "t"}]
+    assert _hook_pass(wins_throat, 0.0) is False
+
+
+def test_words_from_srt_even_split(tmp_path):
+    from scripts.auto_shorts.run import _words_from_srt
+    srt = tmp_path / "v.en.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:04,000\nhello brave world\n",
+                   encoding="utf-8")
+    words = _words_from_srt(srt, 0.0, 4.0)
+    assert [w["word"] for w in words] == ["hello", "brave", "world"]
+    assert words[0]["start"] == 0.0
+    assert words[-1]["end"] == 4.0
+    assert _words_from_srt(tmp_path / "missing.srt", 0.0, 4.0) == []

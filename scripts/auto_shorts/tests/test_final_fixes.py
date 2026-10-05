@@ -12,6 +12,8 @@ def _setup_ok_pipeline(monkeypatch, tmp_path, clip_title="My Clip Title"):
     from scripts.auto_shorts import discover as discover_mod
     from scripts.auto_shorts import download as download_mod
     from scripts.auto_shorts import export_publish as export_mod
+    from scripts.auto_shorts import run as run_mod
+    from scripts.auto_shorts import triage as triage_mod
 
     monkeypatch.setenv("YT_API_KEY", "k")
     monkeypatch.setenv("LLM_PROVIDER", "x")
@@ -34,6 +36,22 @@ def _setup_ok_pipeline(monkeypatch, tmp_path, clip_title="My Clip Title"):
     monkeypatch.setattr(download_mod, "download_video", fake_download)
     payload = {"project_id": "p1", "clips": [
         {"id": "c1", "title": clip_title, "score_100": 90}]}
+
+    def fake_fetch(video_id, work_dir, langs="zh-Hans,zh,en", runner=None):
+        d = Path(work_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        srt = d / f"{video_id}.en.srt"
+        srt.write_text(
+            "1\n00:00:00,000 --> 00:00:45,000\n"
+            + ("wait watch this hook content here now " * 60) + "\n",
+            encoding="utf-8")
+        return srt
+
+    monkeypatch.setattr(triage_mod, "fetch_subtitles", fake_fetch)
+    monkeypatch.setattr(
+        run_mod, "_llm_fn",
+        lambda prompt: {"score": 90, "hook": "wait, watch this",
+                        "reason": "t"})
     monkeypatch.setattr(clip_mod, "run_and_parse",
                         lambda *a, **k: payload)
 

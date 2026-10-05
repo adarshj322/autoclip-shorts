@@ -40,6 +40,22 @@ process environment for the `autoclip` CLI subprocesses (`run`, `export`,
 `publish`), which read them directly. Just export them alongside the
 orchestrator keys; `run.py` passes the environment through untouched.
 
+## Pipeline (one Short per run)
+
+`discover` → `triage` (subtitle-only winner + backup by clippability;
+unfetchable subtitles skip with `no_subtitles` before any download) →
+`download` winner → `autoclip run` top clip → `snap` boundary gate
+(move > 2s skips with `snap_moved`; advisory, the autoclip cut stands) →
+hook veto on the first 3s (LLM `hook` field or hook-keyword presence;
+fail skips with `hook_failed`) → `export --preset shorts` (tracked 9:16:
+box-driven crop expression with 0.3s dwell, static center/stack fallback
+when untracked — always filtered, never silent) → `publish` private.
+The backup is fallback only: it is tried when the winner fails any stage,
+and a run stops after the first publish. No new env knobs: triage scoring
+uses the existing `LLM_PROVIDER=dashscope` + `API_DASHSCOPE_API_KEY` /
+`API_MODEL_NAME` passthrough; tracking deps install from
+`scripts/auto_shorts/requirements.txt` (via `setup_vps.sh`).
+
 ## Usage
 
 ```bash

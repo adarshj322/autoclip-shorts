@@ -57,6 +57,7 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 log "installing python deps (may take a few minutes on first run)"
 "$VENV/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
+"$VENV/bin/pip" install --quiet -r "$INSTALL_DIR/scripts/auto_shorts/requirements.txt"
 "$VENV/bin/pip" install --quiet -e "$INSTALL_DIR"
 [ -x "$VENV/bin/autoclip" ] || die "venv install failed: $VENV/bin/autoclip missing"
 
