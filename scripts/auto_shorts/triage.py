@@ -18,6 +18,16 @@ from pathlib import Path
 
 QUALIFYING_SCORE = 70
 MIN_CLIPS = 2
+# Daily-run cost guard: score at most this many windows per video, picked by
+# the cheap lexical pre-rank below (questions, numbers/superlatives,
+# contrast pivots, first-person stakes).
+MAX_TRIAGE_WINDOWS = 15
+_LEX_SUPERLATIVES_RE = re.compile(
+    r"\b(best|worst|biggest|smallest|greatest|fastest|slowest|easiest|"
+    r"hardest|most|least|top|ultimate|first|last|never|always|ever)\b")
+_LEX_STAKES_RE = re.compile(r"\b(i|me|my|mine|we|us|our|ours)\b")
+_LEX_PIVOTS = ("but", "however", "although", "though", "instead",
+               "truth is", "the truth", "in fact", "actually", "yet")
 
 _TS_RE = re.compile(
     r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)"
@@ -133,10 +143,30 @@ def chunk_windows(
     return windows
 
 
+def _lexical_score(text) -> float:
+    """Cheap hook-potential pre-rank: questions, numbers/superlatives,
+    contrast pivots, first-person stakes. No model call."""
+    t = str(text or "")
+    low = t.lower()
+    score = 3.0 * (t.count("?") + t.count("？"))
+    score += min(len(re.findall(r"\d+", t)), 5)
+    score += len(_LEX_SUPERLATIVES_RE.findall(low))
+    score += 2 * sum(low.count(p) for p in _LEX_PIVOTS)
+    score += len(_LEX_STAKES_RE.findall(low))
+    return score
+
+
+def _preranked_indices(windows: list[dict]) -> set[int]:
+    """Indices of the top-``MAX_TRIAGE_WINDOWS`` windows by lexical score
+    (stable: ties keep chunk order)."""
+    ranked = sorted(range(len(windows)),
+                    key=lambda i: _lexical_score(windows[i].get("text", "")),
+                    reverse=True)
+    return set(ranked[:MAX_TRIAGE_WINDOWS])
+
+
 def _qualifying_count(windows: list[dict]) -> int:
     return sum(1 for w in windows if _to_float(w.get("score")) >= QUALIFYING_SCORE)
-
-
 def _clippability(windows: list[dict]) -> float:
     if not windows:
         return 0.0
@@ -147,9 +177,27 @@ def _clippability(windows: list[dict]) -> float:
 
 
 def score_video(video: dict, srt_path: Path, llm_fn) -> dict:
-    """Score each window via ``llm_fn(prompt) -> dict``; attach clippability."""
+    """Score each window via ``llm_fn(prompt) -> dict``; attach clippability.
+
+    Only the top-``MAX_TRIAGE_WINDOWS`` lexical pre-rank windows reach the
+    model; the rest score 0 (non-qualifying) without a call.
+    """
+    chunked = chunk_windows(srt_path)
+    keep = _preranked_indices(chunked)
     scored: list[dict] = []
-    for w in chunk_windows(srt_path):
+    for i, w in enumerate(chunked):
+        if i not in keep:
+            scored.append(
+                {
+                    "start": w["start"],
+                    "end": w["end"],
+                    "text": w["text"],
+                    "score": 0.0,
+                    "hook": "",
+                    "reason": "pre-rank capped",
+                }
+            )
+            continue
         try:
             res = llm_fn(f"Score this clip transcript 0-100 as JSON "
                          f"{{score, hook, reason}}:\n{w['text']}") or {}

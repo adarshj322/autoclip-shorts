@@ -37,3 +37,42 @@ def test_fetch_subtitles_ignores_foreign_srt(tmp_path):
         class R: returncode = 0; stderr = ""; stdout = ""
         return R()
     assert fetch_subtitles("myvideo", tmp_path, runner=ok) is None
+
+
+def test_score_video_caps_llm_calls_at_15(monkeypatch):
+    from scripts.auto_shorts import triage as triage_mod
+    windows = [{"start": float(i), "end": float(i + 5),
+                "text": f"filler words number {i} here today"}
+               for i in range(20)]
+    monkeypatch.setattr(triage_mod, "chunk_windows",
+                        lambda *a, **k: windows)
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        return {"score": 80, "hook": "h", "reason": "r"}
+
+    out = triage_mod.score_video({"video_id": "v"}, None, llm)
+    assert len(calls) <= 15
+    assert len(out["windows"]) == 20
+
+
+def test_lexical_prerank_prefers_question_window(monkeypatch):
+    from scripts.auto_shorts import triage as triage_mod
+    windows = [{"start": float(i), "end": float(i + 5),
+                "text": f"filler words number {i} here today"}
+               for i in range(19)]
+    windows.append({"start": 100.0, "end": 105.0,
+                    "text": "what is this? why does it happen? how?"})
+    monkeypatch.setattr(triage_mod, "chunk_windows",
+                        lambda *a, **k: windows)
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        return {"score": 80, "hook": "h", "reason": "r"}
+
+    out = triage_mod.score_video({"video_id": "v"}, None, llm)
+    assert len(calls) == 15
+    q = [w for w in out["windows"] if w["start"] == 100.0][0]
+    assert q["score"] == 80  # ?-heavy window beat the filler for a slot

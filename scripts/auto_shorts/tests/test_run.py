@@ -241,3 +241,20 @@ def test_words_from_srt_even_split(tmp_path):
     assert words[0]["start"] == 0.0
     assert words[-1]["end"] == 4.0
     assert _words_from_srt(tmp_path / "missing.srt", 0.0, 4.0) == []
+
+
+def test_hook_keywords_need_word_boundaries():
+    from scripts.auto_shorts.run import _hook_pass
+
+    def wins(text):
+        return [{"start": 0.0, "end": 45.0, "text": text,
+                 "score": 85, "hook": "", "reason": "t"}]
+
+    for trap in ("look out the window today",
+                 "the news tonight at nine",
+                 "come see the show with us"):
+        assert _hook_pass(wins(trap), 0.0) is False
+    for hit in ("you can win a prize",
+                "a brand new day awaits",
+                "how does this work"):
+        assert _hook_pass(wins(hit), 0.0) is True

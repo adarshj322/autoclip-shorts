@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -41,12 +42,15 @@ from scripts.auto_shorts import snap as snap_mod
 from scripts.auto_shorts import triage as triage_mod
 
 HOOK_WINDOW_SEC = 3.0
-HOOK_KEYWORDS = frozenset({
-    "why", "how", "secret", "shocking", "stop", "wait", "watch", "never",
-    "free", "new", "win", "warning", "breaking", "truth", "mistake",
-    "千万", "竟然", "震惊", "注意", "揭秘", "为什么", "如何", "免费",
-    "警告", "真相", "千万别",
-})
+# English keywords match on word boundaries (\b) so "win" never fires inside
+# "window"; CJK keywords (no \b in Han script) stay substring matches.
+_HOOK_EN = ("why", "how", "secret", "shocking", "stop", "wait", "watch",
+            "never", "free", "new", "win", "warning", "breaking", "truth",
+            "mistake")
+_HOOK_CJK = ("千万", "竟然", "震惊", "注意", "揭秘", "为什么", "如何",
+             "免费", "警告", "真相", "千万别")
+HOOK_KEYWORDS = frozenset(_HOOK_EN + _HOOK_CJK)
+_HOOK_EN_RE = re.compile(r"\b(?:" + "|".join(_HOOK_EN) + r")\b")
 
 DISK_MIN_BYTES = 5 * 1024**3
 DISCOVER_MAX_RESULTS = 20
@@ -224,8 +228,9 @@ def _hook_pass(windows: list[dict], start: float) -> bool:
         if str(w.get("hook", "") or "").strip():
             return True
         text = str(w.get("text", "") or "")
-        low = text.lower()
-        if any(k in low for k in HOOK_KEYWORDS):
+        if _HOOK_EN_RE.search(text.lower()):
+            return True
+        if any(k in text for k in _HOOK_CJK):
             return True
         if text.rstrip().endswith(("?", "!", "？", "！")):
             return True
