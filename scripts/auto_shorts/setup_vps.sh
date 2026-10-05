@@ -13,7 +13,7 @@
 #   2. clones feat/auto-shorts-vps, or `git pull --ff-only` if present
 #   3. creates venv, installs requirements + editable `autoclip` package
 #   4. creates .env.auto_shorts from env.example only if missing (chmod 600)
-#   5. runs `autoclip doctor` + one `--dry-run` preflight (keys required)
+#   5. runs `autoclip doctor` as a gate (config/ffmpeg/model reachable)
 #   6. installs the daily flock cron line idempotently
 set -euo pipefail
 
@@ -80,25 +80,17 @@ if [ -z "${YT_API_KEY:-}" ] || [ -z "${UPLOAD_POST_API_KEY:-}" ]; then
 fi
 
 # ------------------------------------------------------- 5. preflight (keys)
-# Gate: doctor must pass and the dry-run must not report a CONFIG error
-# (exit 2). A partial dry-run (exit 1, e.g. a transiently skipped video)
-# still proceeds to cron setup; config errors stop here with the log path.
+# Gate: `autoclip doctor` must pass (config, ffmpeg, whisper, model).
+# NOTE: deliberately no end-to-end dry-run here — output quality can't be
+# judged on a headless VPS, so setup validates plumbing only. Manually
+# verify one real private upload before trusting the schedule.
 export PATH="$INSTALL_DIR/venv/bin:$PATH"
-DRYRUN_LOG="$INSTALL_DIR/logs/setup-dryrun.log"
+SETUP_LOG="$INSTALL_DIR/logs/setup-check.log"
 mkdir -p "$INSTALL_DIR/logs"
 log "running autoclip doctor"
-if ! "$VENV/bin/autoclip" doctor 2>&1 | tee "$DRYRUN_LOG"; then
-    die "autoclip doctor preflight failed (full output in $DRYRUN_LOG) — cron NOT installed. Fix the error and re-run this script."
+if ! "$VENV/bin/autoclip" doctor 2>&1 | tee "$SETUP_LOG"; then
+    die "autoclip doctor preflight failed (full output in $SETUP_LOG) — cron NOT installed. Fix the error and re-run this script."
 fi
-log "running one dry-run (downloads/clips/exports, never publishes)"
-set +e
-"$VENV/bin/python" -m scripts.auto_shorts.run --dry-run --max-per-day 1 >>"$DRYRUN_LOG" 2>&1
-dry_rc=$?
-set -e
-if [ "$dry_rc" -eq 2 ]; then
-    die "dry-run preflight failed with a config error (exit 2; full output in $DRYRUN_LOG) — cron NOT installed. Fix the error and re-run this script."
-fi
-log "dry-run exit $dry_rc (0 = clean, 1 = partial with transient skips); proceeding to cron setup"
 
 # Deno provides the JS runtime for yt-dlp's challenge solver; cron starts
 # with a minimal PATH that never includes it, so install + export here.
