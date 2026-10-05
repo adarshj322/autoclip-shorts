@@ -3,7 +3,8 @@
 Subtitles-only selection: fetch auto-subs (KBs, no video download), chunk
 into overlapping windows, score each window with an injected LLM function,
 and rank videos by ``mean(top-3) x density`` (qualifying clips per 10 min).
-Videos with fewer than 2 scored windows fail the clips gate.
+Videos with fewer than 2 qualifying clips (score >= ``QUALIFYING_SCORE``)
+fail the clips gate; score-less windows count as non-qualifying.
 
 ``runner`` (fetch) and ``llm_fn`` (score) are injectable so tests never hit
 the network or a model — same pattern as ``download.py``.
@@ -64,10 +65,7 @@ def fetch_subtitles(
     if getattr(result, "returncode", 1) != 0:
         return None
     tagged = sorted(work.glob(f"{video_id}*.srt"), key=lambda p: p.name)
-    if tagged:
-        return tagged[0]
-    srts = sorted(work.glob("*.srt"), key=lambda p: p.name)
-    return srts[0] if srts else None
+    return tagged[0] if tagged else None
 
 
 def _parse_ts(h: str, m: str, s: str, ms: str) -> float:
@@ -135,12 +133,16 @@ def chunk_windows(
     return windows
 
 
+def _qualifying_count(windows: list[dict]) -> int:
+    return sum(1 for w in windows if _to_float(w.get("score")) >= QUALIFYING_SCORE)
+
+
 def _clippability(windows: list[dict]) -> float:
     if not windows:
         return 0.0
     top3 = sorted((_to_float(w.get("score")) for w in windows), reverse=True)[:3]
     mean_top3 = sum(top3) / len(top3)
-    density = sum(1 for w in windows if _to_float(w.get("score")) >= QUALIFYING_SCORE) / 10.0
+    density = _qualifying_count(windows) / 10.0
     return mean_top3 * density
 
 
@@ -171,8 +173,10 @@ def score_video(video: dict, srt_path: Path, llm_fn) -> dict:
 
 
 def pick_winner(scored: list[dict]) -> tuple[dict | None, dict | None]:
-    """Rank by clippability; videos with <2 scored windows fail the gate."""
-    eligible = [s for s in scored if len(s.get("windows", [])) >= MIN_CLIPS]
+    """Rank by clippability; videos with <2 qualifying clips fail the gate."""
+    eligible = [
+        s for s in scored if _qualifying_count(s.get("windows", [])) >= MIN_CLIPS
+    ]
     if not eligible:
         return (None, None)
     ranked = sorted(
