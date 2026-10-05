@@ -1,0 +1,5 @@
+# auto-shorts VPS pipeline only. Never merge into the root requirements.txt:
+# the desktop app must not inherit these weights/deps.
+scenedetect==0.7.1
+opencv-python-headless==4.10.0.84
+mediapipe==0.10.21

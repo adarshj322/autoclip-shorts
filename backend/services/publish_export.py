@@ -30,6 +30,9 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     **legacy_export_presets(),
     "1080p60": {"label": "1080p60", "w": 1920, "h": 1080, "layout": "fit", "fps": 60, "max_sec": None},
 }
+# auto-shorts tracked reframing is the shorts default ("crop" stays available
+# as an explicit layout override; Task 4 builds the box-driven crop expr).
+PRESETS["shorts"] = {**PRESETS["shorts"], "layout": "track"}
 
 _jobs: Dict[str, Dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
