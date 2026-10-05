@@ -80,10 +80,11 @@ if [ -z "${YT_API_KEY:-}" ] || [ -z "${UPLOAD_POST_API_KEY:-}" ]; then
 fi
 
 # ------------------------------------------------------- 5. preflight (keys)
-# Gate: `autoclip doctor` must pass (config, ffmpeg, whisper, model).
-# NOTE: deliberately no end-to-end dry-run here — output quality can't be
-# judged on a headless VPS, so setup validates plumbing only. Manually
-# verify one real private upload before trusting the schedule.
+# Gate: `autoclip doctor` must pass, then ONE real single-video run that
+# publishes PRIVATE. Headless VPS can't judge video quality, so the human
+# verifies the private upload in YouTube Studio — but setup proves the
+# full path (discover/download/clip/export/publish) works end to end.
+# A config error (exit 2) stops here with the log path; 0/1 proceed.
 export PATH="$INSTALL_DIR/venv/bin:$PATH"
 SETUP_LOG="$INSTALL_DIR/logs/setup-check.log"
 mkdir -p "$INSTALL_DIR/logs"
@@ -91,6 +92,15 @@ log "running autoclip doctor"
 if ! "$VENV/bin/autoclip" doctor 2>&1 | tee "$SETUP_LOG"; then
     die "autoclip doctor preflight failed (full output in $SETUP_LOG) — cron NOT installed. Fix the error and re-run this script."
 fi
+log "running one REAL single-video run (publishes PRIVATE — verify in YouTube Studio)"
+set +e
+"$VENV/bin/python" -m scripts.auto_shorts.run --max-per-day 1 >>"$SETUP_LOG" 2>&1
+test_rc=$?
+set -e
+if [ "$test_rc" -eq 2 ]; then
+    die "test publish failed with a config error (exit 2; full output in $SETUP_LOG) — cron NOT installed. Fix the error and re-run this script."
+fi
+log "test publish exit $test_rc (0 = published, 1 = partial with transient skips); check YouTube Studio for the private video, then cron setup proceeds"
 
 # Deno provides the JS runtime for yt-dlp's challenge solver; cron starts
 # with a minimal PATH that never includes it, so install + export here.
