@@ -4,8 +4,10 @@ Snaps a coarse (LLM-proposed) ``(start, end)`` window to exact cut points:
 
 sentence end -> VAD-silence edge -> PySceneDetect cut -> sub-60s tail clamp.
 
-Silence edges are inter-word gaps >= ``SILENCE_GAP_SEC`` (300ms) from the
-word-timestamped list — no separate VAD call. Scene-cut anchoring uses the
+Silence edges are inter-word gaps in the ``0.3-0.5s`` band
+(``SILENCE_MIN_GAP_SEC``..``SILENCE_MAX_GAP_SEC``) from the
+word-timestamped list — no separate VAD call. Per edge the largest in-band
+gap wins (a long dialogue pause is a scene break, not a cut point). Scene-cut anchoring uses the
 ``scene_cuts`` timestamps passed in (Task 4 wires the producer via
 :func:`scene_cuts`); a cut within +/- ``SCENE_SNAP_SEC`` of an edge wins.
 The hook (start) is never moved earlier by the tail clamp — over-long
@@ -23,7 +25,8 @@ import re
 from pathlib import Path
 
 SNAP_MOVE_LIMIT_SEC = 2.0
-SILENCE_GAP_SEC = 0.3
+SILENCE_MIN_GAP_SEC = 0.3
+SILENCE_MAX_GAP_SEC = 0.5
 SCENE_SNAP_SEC = 1.0
 MAX_DUR_SEC = 60.0
 _EDGE_SEARCH_SEC = 2.0
@@ -36,6 +39,16 @@ def _to_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _valid_cut(value) -> float | None:
+    """Parse a scene-cut timestamp; None when unparseable (never coerce to 0.0)."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _words_sorted(words: list[dict]) -> list[dict]:
@@ -61,6 +74,8 @@ def _sentence_snap(start: float, end: float, words: list[dict]) -> tuple[float, 
     for w in words:
         if _SENT_END_RE.search(str(w.get("word", ""))):
             wend = _to_float(w["end"])
+            # Forward-only: start may advance to a sentence end ahead, never
+            # reach back into the previous sentence.
             if start <= wend <= start + _EDGE_SEARCH_SEC and abs(wend - start) < abs(ns - start):
                 ns = wend
             if end - _EDGE_SEARCH_SEC <= wend <= end and abs(wend - end) < abs(ne - end):
@@ -72,7 +87,7 @@ def _silence_gaps(words: list[dict]) -> list[tuple[float, float]]:
     gaps = []
     for prev, nxt in zip(words, words[1:]):
         gap = _to_float(nxt["start"]) - _to_float(prev["end"])
-        if gap >= SILENCE_GAP_SEC:
+        if SILENCE_MIN_GAP_SEC <= gap <= SILENCE_MAX_GAP_SEC:
             gaps.append((_to_float(prev["end"]) + gap / 2, gap))
     return gaps
 
@@ -81,10 +96,14 @@ def _silence_snap(start: float, end: float, words: list[dict]) -> tuple[float, f
     gaps = _silence_gaps(words)
     if not gaps:
         return (start, end)
-    near = lambda edge: [m for m, _ in gaps if abs(m - edge) <= _EDGE_SEARCH_SEC]
-    ns = _nearest(start, near(start)) if near(start) else start
-    ne = _nearest(end, near(end)) if near(end) else end
-    return (ns, ne)
+
+    def best(edge: float) -> float:
+        near = [(m, g) for m, g in gaps if abs(m - edge) <= _EDGE_SEARCH_SEC]
+        if not near:
+            return edge
+        return max(near, key=lambda mg: (mg[1], -abs(mg[0] - edge)))[0]
+
+    return (best(start), best(end))
 
 
 def _scene_snap(start: float, end: float, cuts: list[float]) -> tuple[float, float]:
@@ -106,7 +125,7 @@ def snap_window(
     if end < start:
         start, end = end, start
     words = _words_sorted(words)
-    cuts = sorted(_to_float(c) for c in (scene_cuts or []))
+    cuts = sorted(v for v in (_valid_cut(c) for c in (scene_cuts or [])) if v is not None)
     if not words:
         ne = min(end, start + MAX_DUR_SEC)
         return (start, ne, max(0.0, end - ne))
@@ -122,7 +141,11 @@ def snap_window(
 
 
 def scene_cuts(video: Path, start: float, end: float) -> list[float]:
-    """PySceneDetect cut timestamps within ``[start, end]``; [] on any failure."""
+    """PySceneDetect cut timestamps within ``[start, end]``; [] on any failure.
+
+    Uses plain float seconds for ``seek``/``end_time`` (accepted by the
+    installed scenedetect 0.7.x ``detect_scenes`` signature).
+    """
     try:
         from scenedetect import SceneManager, open_video
         from scenedetect.detectors import ContentDetector
@@ -130,18 +153,13 @@ def scene_cuts(video: Path, start: float, end: float) -> list[float]:
         mgr = SceneManager()
         mgr.add_detector(ContentDetector())
         vid = open_video(str(video))
-        start_t = vid.time_to_frame(_to_float(start)) if hasattr(vid, "time_to_frame") else None
-        end_t = vid.time_to_frame(_to_float(end)) if hasattr(vid, "time_to_frame") else None
-        if start_t is not None and end_t is not None and end_t > start_t:
-            vid.seek(start_t)
-            mgr.detect_scenes(vid, end_time=end_t)
-        else:
-            mgr.detect_scenes(vid)
+        vid.seek(float(start))
+        mgr.detect_scenes(vid, end_time=float(end))
         cuts = []
         for s in mgr.get_scene_list():
             try:
                 t = s[0].get_seconds()
-            except (AttributeError, IndexError):
+            except (AttributeError, IndexError, TypeError):
                 continue
             if _to_float(start) <= t <= _to_float(end):
                 cuts.append(float(t))
