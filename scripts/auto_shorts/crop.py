@@ -4,7 +4,8 @@ SPLIT-first: :func:`pick_layout` returns ``"split"`` for >=2 speakers
 (stacked, zero tracking) and ``"track"`` otherwise. :func:`track_boxes`
 samples every ``fps_sample``-th frame at 480p, keeps the largest MediaPipe
 face, and smooths with EMA (alpha ``EMA_ALPHA``). Any failure returns []
-and the caller falls back to the blur-pillarbox layout.
+and the caller falls back to the static center-crop layout
+(``split_filter`` halves for two-speaker content).
 
 :func:`track_filter` / :func:`split_filter` build the single-ffmpeg-pass
 expressions the ``shorts`` export preset renders: dwell-quantized

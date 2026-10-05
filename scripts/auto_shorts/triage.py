@@ -167,12 +167,28 @@ def _preranked_indices(windows: list[dict]) -> set[int]:
 
 def _qualifying_count(windows: list[dict]) -> int:
     return sum(1 for w in windows if _to_float(w.get("score")) >= QUALIFYING_SCORE)
-def _clippability(windows: list[dict]) -> float:
+
+
+def _estimate_duration_sec(windows: list[dict], explicit=None) -> float:
+    """Video duration proxy: explicit ``duration_sec`` when positive, else
+    the max window end (cues extent). 0.0 when neither is available."""
+    exp = _to_float(explicit)
+    if exp > 0:
+        return exp
+    ends = [_to_float(w.get("end")) for w in (windows or [])
+            if _to_float(w.get("end")) > 0]
+    return max(ends) if ends else 0.0
+
+
+def _clippability(windows: list[dict], duration_sec=None) -> float:
     if not windows:
         return 0.0
     top3 = sorted((_to_float(w.get("score")) for w in windows), reverse=True)[:3]
     mean_top3 = sum(top3) / len(top3)
-    density = _qualifying_count(windows) / 10.0
+    dur = _estimate_duration_sec(windows, duration_sec)
+    if dur <= 0:
+        dur = 6000.0  # ponytail: no duration signal; legacy scale (count/10)
+    density = _qualifying_count(windows) / (dur / 600.0)
     return mean_top3 * density
 
 
@@ -216,7 +232,10 @@ def score_video(video: dict, srt_path: Path, llm_fn) -> dict:
     return {
         "video_id": video.get("video_id", ""),
         "windows": scored,
-        "clippability": _clippability(scored),
+        "duration_sec": _estimate_duration_sec(
+            scored, video.get("duration_sec", video.get("duration"))),
+        "clippability": _clippability(
+            scored, video.get("duration_sec", video.get("duration"))),
     }
 
 
@@ -229,7 +248,10 @@ def pick_winner(scored: list[dict]) -> tuple[dict | None, dict | None]:
         return (None, None)
     ranked = sorted(
         eligible,
-        key=lambda s: s.get("clippability", _clippability(s.get("windows", []))),
+        key=lambda s: s.get(
+            "clippability",
+            _clippability(s.get("windows", []), s.get("duration_sec")),
+        ),
         reverse=True,
     )
     winner = ranked[0]

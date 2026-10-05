@@ -214,8 +214,8 @@ def _hook_pass(windows: list[dict], start: float) -> bool:
     """Binary hook veto on the first ``HOOK_WINDOW_SEC`` seconds.
 
     Pass when any overlapping window carries a non-empty LLM ``hook`` field
-    or hook-keyword/question signal in its text. Falls back to the best
-    window when none overlap; empty input fails closed.
+    or hook-keyword/question signal in its text. Fails closed when no
+    window overlaps the snapped start; empty input fails closed.
     """
     if not windows:
         return False
@@ -223,7 +223,7 @@ def _hook_pass(windows: list[dict], start: float) -> bool:
              if float(w.get("end", 0)) > start
              and float(w.get("start", 0)) < start + HOOK_WINDOW_SEC]
     if not cands:
-        cands = [max(windows, key=lambda w: float(w.get("score", 0) or 0))]
+        return False
     for w in cands:
         if str(w.get("hook", "") or "").strip():
             return True
