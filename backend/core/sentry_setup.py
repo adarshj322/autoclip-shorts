@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +24,9 @@ def studio_error_code(error: Exception) -> str:
     from backend.pipeline.failures import PipelineFailure
     if isinstance(error, (VisionRequestError, PipelineFailure)) and error.code in STUDIO_ERROR_CODES:
         return error.code
+    # Local render, frame sampling and optional-runtime preparation use typed subprocess timeouts.
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "timeout"
     # Text rewrite/translation call the SDK directly, without a pipeline wrapper.
     # Recognize its typed failures; unrelated filesystem/programming errors stay unexpected.
     try:
@@ -200,9 +204,15 @@ def init_sentry(mode: str = "web") -> bool:
             LoggingIntegration(level=logging.ERROR, event_level=logging.ERROR),
         ],
     )
-    sentry_sdk.set_tag("runtime", "python")
-    sentry_sdk.set_tag("app_mode", mode)
-    sentry_sdk.set_tag("build_environment", os.getenv("AUTOCLIP_BUILD_ENVIRONMENT", "unknown"))
+    # Consent can first enable the SDK inside a settings request. Request-local
+    # tags disappear when that request exits; process identity belongs globally.
+    scope = sentry_sdk.get_global_scope()
+    scope.set_tag("runtime", "python")
+    scope.set_tag("app_mode", mode)
+    build_environment = os.getenv("AUTOCLIP_BUILD_ENVIRONMENT", "unknown")
+    scope.set_tag("build_environment", build_environment)
+    if build_environment == "validation":
+        scope.set_tag("telemetry_test", "true")
     _initialized = True
     logger.info("Sentry 已启用（backend）")
     return True
