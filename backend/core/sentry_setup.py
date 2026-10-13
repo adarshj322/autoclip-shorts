@@ -15,7 +15,12 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-STUDIO_ERROR_CODES = {"validation", "missing_resource", "unexpected", "timeout", "connection", "authentication", "rate_limited", "provider_error", "invalid_response", "output_truncated", "refused", "llm_not_configured", "whisper_not_installed", "whisper_install_failed", "transcription_empty", "subtitle_setup", "timeline_empty"}
+STUDIO_ERROR_CODES = {"validation", "missing_resource", "unexpected", "timeout", "connection", "authentication", "rate_limited", "provider_error", "invalid_response", "output_truncated", "refused", "llm_not_configured", "whisper_not_installed", "whisper_install_failed", "transcription_empty", "subtitle_setup", "timeline_empty", "source_blocked", "source_too_short", "source_no_audio", "source_unreadable", "service_restarted"}
+# Expected failures caused by the environment or by the user's own source (too short,
+# no audio track): never sent to Sentry, still recorded locally with their code.
+UNREPORTED_STUDIO_ERROR_CODES = {"source_blocked", "source_too_short", "source_no_audio", "service_restarted"}
+# Legacy import task kinds (backend.tasks.import_processing) with the same meaning.
+UNREPORTED_IMPORT_FAILURE_KINDS = {"source-input"}
 PIPELINE_STAGES = {"INGEST", "SUBTITLE", "ANALYZE", "HIGHLIGHT", "EXPORT", "DONE"}
 
 
@@ -41,6 +46,27 @@ def studio_error_code(error: Exception) -> str:
     if isinstance(error, ValueError):
         return "validation"
     return "unexpected"
+
+
+_PIPELINE_FAILURE_STAGES = {"INGEST": "ingest", "SUBTITLE": "subtitle", "ANALYZE": "analyze",
+                            "HIGHLIGHT": "analyze", "EXPORT": "render"}
+
+
+def studio_failure_context(error: Exception, phase: str) -> dict:
+    """Where an automatic run failed and the provider HTTP status, without messages or URLs."""
+    from backend.services.studio.intelligence import VisionRequestError
+    from backend.pipeline.failures import PipelineFailure, http_status_of
+    stage = phase
+    if isinstance(error, PipelineFailure):
+        stage = _PIPELINE_FAILURE_STAGES.get(error.stage, phase)
+    elif isinstance(error, VisionRequestError) and phase != "screening":
+        stage = "vision"
+    result = {"failure_stage": stage}
+    # The pipeline wraps provider errors (`PipelineFailure(...) from error`); the status lives on the cause.
+    status = http_status_of(error)
+    if status is not None:
+        result["http_status"] = status
+    return result
 
 
 PRIVACY_FILE = "privacy.json"
@@ -139,12 +165,16 @@ def before_send(event: dict, hint: Optional[dict] = None) -> Optional[dict]:
                        "stacktrace": {"frames": frames}})
     if not values:
         return None  # Logging-only payloads can contain video text; do not send them.
+    if (event.get("tags") or {}).get("error_code") in UNREPORTED_STUDIO_ERROR_CODES:
+        return None
     clean["exception"] = {"values": values}
     kind, fingerprint = _import_monitoring_fields(event, hint)
+    if kind in UNREPORTED_IMPORT_FAILURE_KINDS:
+        return None
     tags = event.get("tags") or {}
     allowed = {
         "area": {"studio"}, "error_code": STUDIO_ERROR_CODES,
-        "phase": {"screening", "production", "render", "analysis", "dispatch", "vision_test", "rewrite", "auto_frame", "framing_install"},
+        "phase": {"screening", "production", "render", "analysis", "dispatch", "vision_test", "rewrite", "auto_frame", "framing_install", "qa", "packaging_html", "packaging_runtime"},
         "analysis_mode": {"subtitle", "visual"},
         "goal": {"content", "highlight", "promo"},
         "runtime": {"python"}, "app_mode": {"web", "desktop"},
@@ -226,12 +256,18 @@ def capture_studio_exception(error: Exception, phase: str, *, analysis_mode=None
     """
     if not _initialized or not crash_reports_enabled():
         return None
+    from backend.core.project_cancellation import ProjectDeleted
+    if isinstance(error, ProjectDeleted):
+        return None  # the user deleted the project mid-run: expected, not a crash (RC156 #12)
     try:
+        code = studio_error_code(error)
+        if code in UNREPORTED_STUDIO_ERROR_CODES:
+            return None
         import sentry_sdk
         with sentry_sdk.new_scope() as scope:
             scope.set_tag("area", "studio")
             scope.set_tag("phase", phase)
-            scope.set_tag("error_code", studio_error_code(error))
+            scope.set_tag("error_code", code)
             stage = getattr(error, "stage", None)
             if isinstance(stage, str) and stage in PIPELINE_STAGES:
                 scope.set_tag("pipeline_stage", stage)
@@ -239,6 +275,9 @@ def capture_studio_exception(error: Exception, phase: str, *, analysis_mode=None
                 scope.set_tag("analysis_mode", analysis_mode)
             if goal:
                 scope.set_tag("goal", goal)
+            detail = getattr(error, "probe_detail", None)
+            if isinstance(detail, str) and detail:
+                scope.set_context("source_probe", {"stderr_tail": detail[-600:]})
             return sentry_sdk.capture_exception(error)
     except Exception:
         return None

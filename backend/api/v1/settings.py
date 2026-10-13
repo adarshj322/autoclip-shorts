@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, validator
 
 logger = logging.getLogger(__name__)
 
+from backend import __version__
 from backend.core.desktop_config import get_desktop_config, is_desktop_mode, DesktopConfig, save_desktop_config
 from backend.services.config_sync_service import config_sync_service
 from pathlib import Path
@@ -89,7 +90,7 @@ def test_connection_assignment(body: ConnectionTestRequest):
 class BasicSettings(BaseModel):
     """基础设置"""
     app_name: str = Field(default="AutoClip Desktop", description="应用名称")
-    app_version: str = Field(default="1.0.0", description="应用版本")
+    app_version: str = Field(default=__version__, description="应用版本")
     debug_mode: bool = Field(default=False, description="调试模式")
     auto_start: bool = Field(default=True, description="自动启动")
 
@@ -231,6 +232,19 @@ async def get_privacy():
     """崩溃报告等隐私开关（桌面数据目录 privacy.json）。"""
     from backend.core.sentry_setup import crash_reports_enabled
     return PrivacySettings(crash_reports=crash_reports_enabled())
+
+
+class AnalyticsIdentity(BaseModel):
+    distinct_id: str = Field(min_length=8, max_length=200)
+
+
+@router.put("/analytics-identity")
+async def put_analytics_identity(body: AnalyticsIdentity):
+    """Remember the UI's anonymous PostHog id. Backend QA events reuse it."""
+    from backend.services.studio.qa.telemetry import remember_distinct_id
+    if not remember_distinct_id(body.distinct_id):
+        raise HTTPException(status_code=422, detail="invalid distinct_id")
+    return {"ok": True}
 
 
 @router.put("/privacy")

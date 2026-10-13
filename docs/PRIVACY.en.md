@@ -3,7 +3,7 @@
 *[中文版 →](./PRIVACY.md)*
 
 **Effective Date: June 3, 2026**
-**Last Updated: September 30, 2026**
+**Last Updated: October 9, 2026**
 
 > ⚠️ This is a draft template. Please have legal counsel review it before publishing (see "Clauses Requiring Legal Review" at the end).
 
@@ -42,6 +42,7 @@ Local correlation mappings retain up to 500 projects active within 35 days and 1
 - **Anonymity**: We use a randomly generated device identifier and do not build identifiable user profiles.
 - **Recipient**: PostHog Inc., with data stored on its **United States** servers (see Section 6, "International Transfers").
 - **Local buffering**: Events are batched locally before sending; network issues do not affect normal use of the Software.
+- **Feature flags**: The Software requests boolean or enum feature-flag values from PostHog only while Anonymous Usage Analytics is on, to decide whether an interface that is not fully rolled out is shown. Turning analytics off sends no flag request, and every new feature stays at its build-time off default. Flag values do not include video, subtitles, or keys. Experiment overrides stay on this computer and appear only in a development build's settings. Release builds do not show that section.
 
 ### 2.2 Crash reports (optional, on by default)
 
@@ -79,7 +80,7 @@ We **do not** use this data for advertising, and we **do not** sell any of your 
 
 ### 4.1 Turn Off Usage Analytics
 
-You can disable "Anonymous Usage Analytics" at any time under **Settings → App**. Once disabled, the Software **immediately stops sending usage analytics**, and this setting persists across restarts. Turning analytics off does not block an explicit feedback submission.
+You can disable "Anonymous Usage Analytics" at any time under **Settings → App**. Once disabled, the Software **immediately stops sending usage analytics** and also stops requesting feature flags. This setting persists across restarts. Turning analytics off does not block an explicit feedback submission.
 
 ### 4.2 Your Legal Rights
 
@@ -97,7 +98,9 @@ To exercise these rights or file a complaint, contact us using the details below
 
 ## 5. Data Storage and Retention
 
-- **Local data** (projects, videos, subtitles, settings, keys): stored on your device and fully under your control; uninstalling the Software or deleting a project removes it.
+- **Local data** (projects, videos, subtitles, settings, keys): stored on your device and fully under your control; deleting a project removes its data. Uninstalling keeps this data by default so a reinstall can pick it up:
+  - Windows: tick "Also delete my AutoClip data (projects, settings, API keys)" in the uninstaller to also delete `%APPDATA%\AutoClip` and the app's WebView data (`%APPDATA%\com.autoclip.desktop`, `%LOCALAPPDATA%\com.autoclip.desktop`); it is unticked by default. A silent uninstall deletes the same directories only when `/DELETEAPPDATA` is passed explicitly; upgrades never delete them.
+  - macOS / Linux: delete the data directory `~/Library/Application Support/AutoClip` or `~/.local/share/AutoClip` manually.
 - **Anonymous analytics data**: stored by PostHog, retained according to our retention policy (by default no longer than **12 months**), after which it is automatically deleted or anonymized.
 
 ---

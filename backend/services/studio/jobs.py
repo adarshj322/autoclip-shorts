@@ -2,13 +2,14 @@ import json
 import logging
 import shutil
 from time import monotonic, sleep
-from backend.core.sentry_setup import capture_studio_exception, studio_error_code
+from backend.core.sentry_setup import capture_studio_exception, studio_error_code, studio_failure_context
 from copy import deepcopy
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from backend.core import llm_usage
 from backend.services.studio import audio, intelligence, store
+from backend.services.studio.features import resolve_features
 from backend.services.studio.models import Draft, Preferences, Scene
 from backend.services.studio.project_completion import sync_project_completion
 from backend.services.studio.intelligence import analyze, make_drafts, VisionRequestError
@@ -16,6 +17,11 @@ from backend.services.studio.render import render_draft
 
 logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='studio')
+
+
+def _generation_route(plan):
+    route = (plan or {}).get('recommended_analysis') or (plan or {}).get('confirmed_analysis')
+    return {'route': route} if route in ('subtitle', 'visual') else {}
 # Local encodes are CPU-bound: run one at a time on its own worker so screening and
 # analysis of other imports never wait behind a render queue.
 render_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='studio-render')
@@ -25,10 +31,19 @@ def source(project_id):
     from backend.services.publish_export import find_source_video
     return find_source_video(project_id)
 
-def export(project_id, draft, *, brand_outro=False, _variant_identity=None):
+def export(project_id, draft, *, brand_outro=False, _variant_identity=None, html_template=None, html_fallback=None, safe_area='xiaohongshu', requested_template=None):
     from backend.services.output_branding import load_settings
     brand_outro = bool(brand_outro and load_settings().enabled)
-    job = {'job_id': uuid.uuid4().hex, 'status': 'queued', 'percent': 0, 'draft_id': draft.id, 'title': draft.title, 'revision': draft.revision, 'brand_outro': brand_outro, 'created_at': store.now(), 'instance': store.INSTANCE, 'snapshot': draft.model_dump()}
+    from backend.services.studio.template_choice import recorded_style
+    style = recorded_style(html_template, requested_template)
+    job = {'job_id': uuid.uuid4().hex, 'status': 'queued', 'percent': 0, 'draft_id': draft.id, 'title': draft.title, 'revision': draft.revision, 'brand_outro': brand_outro, 'created_at': store.now(), 'instance': store.INSTANCE, 'snapshot': draft.model_dump(), **style}
+    if html_template in ('editorial', 'street') and style['template'] in ('editorial', 'street'):
+        job['html_template'] = html_template
+        job['html_safe_area'] = safe_area
+    elif html_fallback == 'rank':
+        job['html_fallback'] = 'rank'
+        if requested_template in ('editorial', 'street'):
+            job['requested_template'] = requested_template
     if _variant_identity is not None:
         job['variant_links'] = [list(_variant_identity)]
     def add(data):
@@ -46,10 +61,18 @@ def export(project_id, draft, *, brand_outro=False, _variant_identity=None):
         added = store.change(project_id, add)
         if added['job_id'] == job['job_id']:
             try:
-                if brand_outro:
-                    render_executor.submit(_render, project_id, draft, job['job_id'], brand_outro=True, _io_receipt=('render', job['job_id']))
-                else:
-                    render_executor.submit(_render, project_id, draft, job['job_id'], _io_receipt=('render', job['job_id']))
+                render_kwargs = {'brand_outro': brand_outro}
+                if job.get('html_template'):
+                    render_kwargs['html_template'] = job['html_template']
+                    render_kwargs['safe_area'] = job.get('html_safe_area') or 'xiaohongshu'
+                elif job.get('html_fallback'):
+                    render_kwargs['html_fallback'] = job['html_fallback']
+                    if job.get('requested_template'):
+                        render_kwargs['requested_template'] = job['requested_template']
+                render_executor.submit(
+                    _render, project_id, draft, job['job_id'],
+                    _io_receipt=('render', job['job_id']), **render_kwargs,
+                )
             except Exception as error:
                 logger.warning('Studio export dispatch failed: %s', type(error).__name__)
                 capture_studio_exception(error, 'dispatch')
@@ -71,9 +94,12 @@ def _tracked(stage):
         @wraps(fn)
         def run(project_id, *args, **kwargs):
             identity = kwargs.pop('_io_receipt', None)
-            with store.worker_read_scope(project_id, identity), llm_usage.tracking(project_id), llm_usage.stage(stage):
+            from backend.core.project_cancellation import ProjectDeleted, bind
+            with bind(project_id), store.worker_read_scope(project_id, identity), llm_usage.tracking(project_id), llm_usage.stage(stage):
                 try:
                     return fn(project_id, *args, **kwargs)
+                except ProjectDeleted:
+                    return None  # deleted: the binder removes leftover files; nothing to record
                 except PermissionError as error:
                     if store.read_error_needs_report(error):
                         phase = {'visual_analysis': 'analysis', 'ai_cover': 'production'}.get(stage, stage)
@@ -84,24 +110,83 @@ def _tracked(stage):
 
 
 @_tracked('render')
-def _render(project_id, draft, job_id, *, brand_outro=False):
+def _render(project_id, draft, job_id, *, brand_outro=False, html_template=None, html_fallback=None, safe_area='xiaohongshu', requested_template=None):
+    from backend.core import project_cancellation
     started = monotonic()
     render_saved = False
+    result = None
+    qa_scheduled = False
+
     def update(**values):
         def mutate(data):
-            next(j for j in data['jobs'] if j['job_id'] == job_id).update(values)
+            job = next(j for j in data['jobs'] if j['job_id'] == job_id)
+            incoming = values.get('status')
+            current = job.get('status')
+            # A cancel must not be overwritten by the render finishing, and a finished
+            # video must not be marked cancelled afterwards.
+            if current == 'cancelled' and incoming == 'completed':
+                return
+            if current == 'completed' and incoming == 'cancelled':
+                return
+            job.update(values)
         store.change(project_id, mutate)
+
+    def _schedule_qa():
+        """Enqueue shadow checks only after the export is already completed."""
+        nonlocal qa_scheduled
+        if qa_scheduled or not render_saved:
+            return
+        qa_scheduled = True
+        try:
+            from backend.services.studio.qa.schedule import schedule_after_render
+        except Exception as error:
+            logger.warning('QA import failed: %s', type(error).__name__)
+            return
+        try:
+            schedule_after_render(project_id, draft, job_id, result)
+        except Exception as error:
+            logger.warning('QA schedule failed: %s', type(error).__name__)
+
     try:
         update(status='running', percent=5)
+        features = None
+        try:
+            features = (store.read(project_id).get('generation') or {}).get('features')
+        except Exception:
+            features = None
         with llm_usage.timed('render'):
-            result = render_draft(project_id, source(project_id), draft, job_id, lambda p: update(percent=p), brand_outro=brand_outro)
-        update(status='completed', percent=100, result=result, cover_pending=True, duration_ms=round((monotonic() - started) * 1000))
+            render_kwargs = {'brand_outro': brand_outro}
+            if html_template:
+                render_kwargs.update(html_template=html_template, features=features, safe_area=safe_area)
+            elif html_fallback:
+                render_kwargs.update(html_fallback=html_fallback, features=features)
+                if requested_template in ('editorial', 'street'):
+                    render_kwargs['requested_template'] = requested_template
+            result = render_draft(
+                project_id, source(project_id), draft, job_id, lambda p: update(percent=p),
+                **render_kwargs,
+            )
+        elapsed = round((monotonic() - started) * 1000)
+        if isinstance(result, dict) and result.get('template_render'):
+            from backend.services.studio.template_telemetry import host_facts, render_event
+            # duration_ms on the event is the overlay's own time. The job record keeps the whole render.
+            result = {**result, 'template_render': render_event({**host_facts(), **result['template_render']})}
+        update(status='completed', percent=100, result=result, cover_pending=True, duration_ms=elapsed)
         render_saved = True
         try:
             _design_covers(project_id, draft, job_id)
         finally:
             update(cover_pending=False)
         _sync_variant_status(project_id, job_id, 'completed')
+        _schedule_qa()
+    except project_cancellation.JobStopped:
+        with project_cancellation.record_stop():
+            try:
+                update(status='cancelled', error_code='cancelled', duration_ms=round((monotonic() - started) * 1000))
+                _sync_variant_status(project_id, job_id, 'cancelled')
+            except (FileNotFoundError, project_cancellation.ProjectDeleted):
+                pass
+        return
     except Exception as error:
         logger.warning('Studio render failed: %s', type(error).__name__)
         capture_studio_exception(error, 'render')
@@ -109,6 +194,7 @@ def _render(project_id, draft, job_id, *, brand_outro=False):
         if render_saved:
             # Optional cover/index work cannot revoke an already committed video.
             _sync_variant_status(project_id, job_id, 'completed')
+            _schedule_qa()
             return
         try:
             message = str(error)[:700]
@@ -378,10 +464,17 @@ def run_content(project_id, video):
     if not result or not result.get('success'):
         message = (result or {}).get('error') or '内容切片未完成，请检查语音与文字模型设置后重试'
         failure = (result or {}).get('result') or {}
+        # The original exception does not survive apply().get(): the adapter records the provider
+        # HTTP status in the result dict and it is carried back here (RC156 Win QA #1).
+        status = failure.get('http_status')
+        status = status if type(status) is int and 400 <= status <= 599 else None
         if failure.get('error_code') or failure.get('stage'):
             from backend.pipeline.failures import PipelineFailure
-            raise PipelineFailure(failure.get('stage', ''), message, code=failure.get('error_code') or '')
-        raise RuntimeError(message)
+            raise PipelineFailure(failure.get('stage', ''), message, code=failure.get('error_code') or '', http_status=status)
+        error = RuntimeError(message)
+        if status is not None:
+            error.http_status = status
+        raise error
 
     clips = result.get('result', {}).get('result', {}).get('titled_clips')
     if not clips:
@@ -452,6 +545,35 @@ def _complete_thought_bounds(project_id, clips):
         return boundaries.refine_clips(rows, clips, call, boundaries.audio_silences(source(project_id)) if audio.has_audio(source(project_id)) else None)
 
 
+MAX_DRAFT_OVERLAP = 0.5  # share of the shorter clip two content drafts may have in common
+
+
+def _overlap_share(a, b):
+    shared = min(a[1], b[1]) - max(a[0], b[0])
+    shorter = min(a[1] - a[0], b[1] - b[0])
+    return shared / shorter if shared > 0 and shorter > 0 else 0.0
+
+
+def _distinct_ranges(picked, bounds):
+    """(clip, start, end) without near-duplicate drafts (RC156 Win QA #7).
+
+    Boundary polishing may push two clips onto the same span. Higher-scored clips keep their
+    polished range; a lower-scored one falls back to its original pipeline range, and is
+    dropped only when that still mostly repeats a kept clip. Original order is preserved.
+    """
+    order = sorted(range(len(picked)), key=lambda i: _score(picked[i][0]), reverse=True)
+    kept = {}
+    for i in order:
+        clip, original_start, original_end = picked[i]
+        for candidate in (tuple(bounds[i]), (original_start, original_end)):
+            if all(_overlap_share(candidate, other) <= MAX_DRAFT_OVERLAP for other in kept.values()):
+                kept[i] = candidate
+                break
+        else:
+            logger.info('Dropped a content clip that repeats a higher-scored clip')
+    return [(picked[i][0], *kept[i]) for i in sorted(kept)]
+
+
 def _content_drafts(project_id, plan, video):
     """Create drafts once from the selected content route, before platform derivation."""
     route = plan.get('recommended_analysis', 'subtitle')
@@ -470,7 +592,7 @@ def _content_drafts(project_id, plan, video):
         bounds = _complete_thought_bounds(project_id, [(s, e) for _, s, e in picked])
         source_duration = float(intelligence._probe(video).get('duration') or 0)
         drafts = []
-        for (clip, _, _), (start, end) in zip(picked, bounds):
+        for clip, start, end in _distinct_ranges(picked, bounds):
             # Transcript timestamps can run past the final video frame. Keep valid content
             # from that clip, and never let one invalid range discard the whole batch.
             end = min(end, source_duration)
@@ -496,8 +618,18 @@ def _content_drafts(project_id, plan, video):
         raise ValueError('没有可用的自动分析路径，请检查模型设置后重试')
     if not intelligence.ready():
         raise ValueError('请先在设置中配置视觉理解模型')
-    events, coverage = analyze(video, prefs)
-    drafts = make_drafts(events, prefs, plan.get('overrides', {}).get('instruction', ''), source_duration=intelligence._probe(video).get('duration'))
+    try:
+        events, coverage = analyze(video, prefs)
+        drafts = make_drafts(events, prefs, plan.get('overrides', {}).get('instruction', ''), source_duration=intelligence._probe(video).get('duration'))
+    except ValueError as error:
+        # A silent source that the visual route could not cut (RC156 Win QA #19): explain the missing
+        # sound and point to an SRT instead of a bare 「没有找到可用镜头」. Model/network errors
+        # (VisionRequestError) keep their own message.
+        from backend.pipeline import media_precheck
+        silent = media_precheck.silent_visual_failure(video, srt_available=(Path(video).parent / 'input.srt').is_file())
+        if silent is None:
+            raise
+        raise silent from error
     return drafts, [event.model_dump() for event in events], coverage
 
 
@@ -947,8 +1079,12 @@ def _auto_generate(project_id, plan):
                 if _eligible_for_platform(base, platform_strategy(strategy_id))])
             for strategy_id in platforms
         }
+        from backend.services.studio.template_choice import html_candidate_ids, selected_template
+        chosen = selected_template(generation)
+        html_ids = html_candidate_ids(base_drafts) if chosen else set()
         planned = []
         for base in base_drafts:
+            source_id = base['id']
             base = {key: item for key, item in base.items() if key != SCORE_KEY}
             for strategy_id in platforms:
                 strategy = platform_strategy(strategy_id)
@@ -956,21 +1092,24 @@ def _auto_generate(project_id, plan):
                     skipped.append({'strategy_id': strategy_id, 'reason': '素材没有足够完整的长内容'})
                     continue
                 value, trimmed = _fit_platform_limit(project_id, {**base, 'id': uuid.uuid4().hex, 'revision': 1}, strategy)
-                now = base['id'] in automatic[strategy_id]
+                now = source_id in automatic[strategy_id]
+                use_html = bool(chosen) and now and strategy.aspect == 'portrait' and source_id in html_ids
+                rank_fallback = bool(chosen) and now and strategy.aspect == 'portrait' and source_id not in html_ids
                 framed = None  # on-demand versions are framed and packaged when the user asks (produce_variant)
                 if now:
                     with llm_usage.timed('framing'):
                         value, framed = _apply_framing(project_id, value, strategy_id, video, burned, framing_cache)
-                planned.append((strategy_id, value, trimmed, framed, now))
+                planned.append((strategy_id, value, trimmed, framed, now, use_html, rank_fallback))
         with llm_usage.timed('packaging'):
-            _prefetch_packaging(project_id, [(strategy_id, value) for strategy_id, value, _, _, now in planned if now], burned, packaging_cache)
+            _prefetch_packaging(project_id, [(strategy_id, value) for strategy_id, value, _, _, now, _, _ in planned if now], burned, packaging_cache)
         with llm_usage.timed('post_copy'):
-            posts = _posts_for(project_id, [(strategy_id, value) for strategy_id, value, _, _, now in planned if now], packaging_cache)
-        for strategy_id, value, trimmed, framed, now in planned:
+            posts = _posts_for(project_id, [(strategy_id, value) for strategy_id, value, _, _, now, _, _ in planned if now], packaging_cache)
+        for strategy_id, value, trimmed, framed, now, use_html, rank_fallback in planned:
             if now:
                 value = _apply_packaging(project_id, value, strategy_id, burned, packaging_cache)
                 value = _audience_title(value, strategy_id, posts.get((_content_key(value), strategy_id)))
-            draft = _apply_strategy(value, strategy_id, burned_subtitles=burned, layout=value.get('layout') if framed else None)
+            layout = 'crop' if use_html and framed != 'full_frame_captions' else (value.get('layout') if framed else None)
+            draft = _apply_strategy(value, strategy_id, burned_subtitles=burned, layout=layout)
             derived_drafts.append(draft.model_dump())
             variants.append({
                 'id': uuid.uuid4().hex, 'draft_id': draft.id, 'draft_revision': draft.revision,
@@ -979,6 +1118,8 @@ def _auto_generate(project_id, plan):
                 **({'trimmed_to_sec': trimmed} if trimmed else {}),
                 **({'framing': framed} if framed else {}),
                 **({'post': posts[_content_key(value), strategy_id]} if (_content_key(value), strategy_id) in posts else {}),
+                **({'html_template': chosen} if use_html else {}),
+                **({'html_fallback': 'rank', 'requested_template': chosen} if rank_fallback else {}),
             })
         if not variants:
             raise ValueError('所选平台没有可生成的完整内容版本')
@@ -987,7 +1128,7 @@ def _auto_generate(project_id, plan):
             if events:
                 data['events'] = events
             data['output_variants'].extend(variants)
-            data['generation'].update(status='rendering', skipped=skipped, started_at=data['generation'].get('started_at') or store.now())
+            data['generation'].update(status='rendering', skipped=skipped, started_at=data['generation'].get('started_at') or store.now(), **_generation_route(data.get('plan')))
             data['analysis'] = {'status': 'running', 'phase': 'rendering', 'run_id': (data.get('analysis') or {}).get('run_id'), 'message': '正在生成可发布成片', 'instance': store.INSTANCE, 'created_at': store.now()}
         store.change(project_id, persist)
         _dispatch_pending_variants(project_id)
@@ -995,10 +1136,11 @@ def _auto_generate(project_id, plan):
         store.raise_owned_read_error(error)
         capture_studio_exception(error, 'production')
         code = studio_error_code(error)
+        context = studio_failure_context(error, 'production')
         error_text = str(error)[:700]
         def fail(data):
             if data.get('generation'):
-                data['generation'].update(status='failed', error=error_text, error_code=code, skipped=skipped, finished_at=store.now())
+                data['generation'].update(status='failed', error=error_text, error_code=code, skipped=skipped, finished_at=store.now(), **context)
             data['analysis'] = {'status': 'failed', 'phase': 'production', 'run_id': (data.get('analysis') or {}).get('run_id'), 'error': error_text, 'error_code': code, 'duration_ms': round((monotonic() - started) * 1000)}
         store.change(project_id, fail)
         mark_project(project_id, 'failed')
@@ -1022,6 +1164,23 @@ def append_platform_variants(project_id, platforms, branding):
         tuple((scene['start'], scene['end']) for scene in draft_by_id.get(item['draft_id'], {}).get('scenes', []))
         for item in state.get('output_variants', []) if item.get('status') != 'on_demand'
     }
+    html_by_signature = {}
+    requested_by_signature = {}
+    rank_signatures = set()
+    for item in state.get('output_variants', []):
+        origin = draft_by_id.get(item.get('draft_id')) or {}
+        signature = tuple((scene['start'], scene['end']) for scene in origin.get('scenes', []))
+        if item.get('html_template'):
+            html_by_signature[signature] = item['html_template']
+            requested_by_signature.setdefault(signature, item['html_template'])
+        if item.get('html_fallback') == 'rank':
+            rank_signatures.add(signature)
+            if item.get('requested_template') in ('editorial', 'street'):
+                requested_by_signature.setdefault(signature, item['requested_template'])
+    chosen = (state.get('generation') or {}).get('html_template')
+    if chosen in ('editorial', 'street'):
+        for signature in rank_signatures:
+            requested_by_signature.setdefault(signature, chosen)
     seen_scenes, variants, derived = set(), [], []
     burned = _source_has_burned_subtitles(project_id)
     video = source(project_id)
@@ -1047,7 +1206,10 @@ def append_platform_variants(project_id, platforms, branding):
                 value = _apply_packaging(project_id, value, strategy_id, burned, packaging_cache)
                 post = _posts_for(project_id, [(strategy_id, value)], packaging_cache).get((_content_key(value), strategy_id))
                 value = _audience_title(value, strategy_id, post)
-            draft = _apply_strategy(value, strategy_id, burned_subtitles=burned, layout=value.get('layout') if framed else None)
+            inherited = html_by_signature.get(signature) if now and strategy.aspect == 'portrait' else None
+            rank_fallback = signature in rank_signatures and now and strategy.aspect == 'portrait' and not inherited
+            layout = 'crop' if inherited and framed != 'full_frame_captions' else (value.get('layout') if framed else None)
+            draft = _apply_strategy(value, strategy_id, burned_subtitles=burned, layout=layout)
             derived.append(draft.model_dump())
             variants.append({
                 'id': uuid.uuid4().hex, 'draft_id': draft.id, 'draft_revision': 1,
@@ -1056,6 +1218,8 @@ def append_platform_variants(project_id, platforms, branding):
                 **({'trimmed_to_sec': trimmed} if trimmed else {}),
                 **({'framing': framed} if framed else {}),
                 **({'post': post} if post else {}),
+                **({'html_template': inherited} if inherited else {}),
+                **({'html_fallback': 'rank', 'requested_template': requested_by_signature.get(signature)} if rank_fallback and requested_by_signature.get(signature) else {'html_fallback': 'rank'} if rank_fallback else {}),
             })
     if not variants:
         raise ValueError('没有可追加的平台版本；已存在或素材不满足所选平台要求')
@@ -1094,7 +1258,20 @@ def _dispatch_pending_variants(project_id):
             store.change(project_id, lambda data: reject(data, '来源草稿不存在', 'missing_resource'))
             continue
         try:
-            job = export(project_id, Draft.model_validate(raw), brand_outro=bool(variant['branding'].get('outro_enabled', True)), _variant_identity=expected)
+            from backend.services.studio.overlay_fill import SAFE_AREAS
+            export_kwargs = {}
+            if variant.get('html_template'):
+                export_kwargs['html_template'] = variant['html_template']
+                export_kwargs['safe_area'] = variant.get('strategy_id') if variant.get('strategy_id') in SAFE_AREAS else 'xiaohongshu'
+            elif variant.get('html_fallback'):
+                export_kwargs['html_fallback'] = variant['html_fallback']
+                if variant.get('requested_template') in ('editorial', 'street'):
+                    export_kwargs['requested_template'] = variant['requested_template']
+            job = export(
+                project_id, Draft.model_validate(raw),
+                brand_outro=bool(variant['branding'].get('outro_enabled', True)),
+                _variant_identity=expected, **export_kwargs,
+            )
         except Exception as error:
             store.raise_owned_read_error(error)
             capture_studio_exception(error, 'dispatch')
@@ -1270,6 +1447,11 @@ def _sync_variant_status(project_id, job_id, status, error=None):
         changed = False
         for variant in data.get('output_variants', []):
             if variant.get('render_job_id') == job_id:
+                current = variant.get('status')
+                if current == 'cancelled' and status == 'completed':
+                    continue
+                if current == 'completed' and status == 'cancelled':
+                    continue
                 variant.update(status=status)
                 if error:
                     variant['error'] = error
@@ -1284,7 +1466,7 @@ def _finish_generation(data):
     store.settle_generation(data)
 
 
-def inspect_project(project_id, options, url=None, browser=None, *, producer=None):
+def inspect_project(project_id, options, url=None, browser=None, *, producer=None, features=None):
     """Only ingest and screen. Expensive production requires an explicit confirmation."""
     # Reserve and dispatch together so another request cannot observe an
     # accepted task before submission succeeds. Preserve existing exports/plan.
@@ -1294,11 +1476,18 @@ def inspect_project(project_id, options, url=None, browser=None, *, producer=Non
             raise ValueError('当前任务正在运行，请稍后再试')
         state = deepcopy(previous)
         state.setdefault('schema_version', 2)
+        from backend.services.studio.template_choice import style_for_request
+        style = style_for_request(getattr(options, 'html_template', None), features)
         state['generation'] = {
             'requested_platforms': list(options.platforms),
             'branding': options.branding.model_dump(),
             'auto_start': options.auto_start,
             'portrait_style': options.portrait_style,
+            **({'html_template': options.html_template} if getattr(options, 'html_template', None) else {}),
+            **({'recommended_template': options.recommended_template} if getattr(options, 'recommended_template', None) else {}),
+            **({'accepted_recommendation': options.html_template == options.recommended_template} if getattr(options, 'recommended_template', None) and getattr(options, 'html_template', None) else {}),
+            **style,
+            'features': resolve_features(features),
             **({'producer': producer} if producer else {}),
             'status': 'screening',
             'created_at': store.now(),
@@ -1341,7 +1530,7 @@ def _inspect(project_id, options, url, browser):
             def start_automatic(data):
                 run_id = (data.get('analysis') or {}).get('run_id')  # observers match the run across phases
                 data.update(plan=plan, analysis={'status': 'running', 'phase': 'production', 'run_id': run_id, 'message': '正在制作可发布成片', 'instance': store.INSTANCE, 'created_at': store.now()})
-                data['generation'].update(status='production', started_at=store.now())
+                data['generation'].update(status='production', started_at=store.now(), **_generation_route(plan))
                 return run_id
             run_id = store.change(project_id, start_automatic)
             mark_project(project_id, 'processing', creative=plan['preferences'], awaiting_confirmation=False, import_staging=False)
@@ -1354,7 +1543,7 @@ def _inspect(project_id, options, url, browser):
                 message = '自动制作任务未能启动，请重试；原素材已保留'
                 code = studio_error_code(error)
                 def fail_automatic(data):
-                    data['generation'].update(status='failed', error=message, error_code=code, finished_at=store.now())
+                    data['generation'].update(status='failed', error=message, error_code=code, finished_at=store.now(), failure_stage='dispatch', **_generation_route(plan))
                     data['analysis'] = {'status': 'failed', 'phase': 'production', 'error': message, 'error_code': code}
                 store.change(project_id, fail_automatic)
                 mark_project(project_id, 'failed')
@@ -1370,11 +1559,14 @@ def _inspect(project_id, options, url, browser):
         logger.warning('Studio screening failed: %s', type(error).__name__)
         capture_studio_exception(error, 'screening')
         failure = {'status':'failed','phase':'screening','error':str(error)[:700], 'error_code':studio_error_code(error), 'duration_ms':round((monotonic() - started) * 1000)}
+        if getattr(error, 'probe_detail', None):
+            failure['probe_detail'] = error.probe_detail
+        context = studio_failure_context(error, 'screening')
         try:
             def fail_screening(data):
                 data['analysis'] = failure
                 if (data.get('generation') or {}).get('auto_start'):
-                    data['generation'].update(status='failed', error=failure['error'], error_code=failure['error_code'], finished_at=store.now())
+                    data['generation'].update(status='failed', error=failure['error'], error_code=failure['error_code'], finished_at=store.now(), **context)
             store.change(project_id, fail_screening)
             mark_project(project_id, 'failed')
         except FileNotFoundError:
@@ -1394,6 +1586,14 @@ def confirm_project(project_id, body):
             from backend.services.studio import intelligence
             if not intelligence.ready():
                 raise ValueError('视觉模型不可用，请配置后重新确认；原素材已保留')
+        if route == 'subtitle' or 'content' in body.goals:
+            # Too short / no audio and no SRT: refuse before production spends any model call (RC156 #10/#11).
+            from backend.pipeline import media_precheck
+            video = source(project_id)
+            blocked = media_precheck.subtitle_route_failure(
+                video, srt_available=(video.parent / 'input.srt').is_file(), duration=plan.get('source_duration'))
+            if blocked:
+                raise ValueError(str(blocked))
         previous = deepcopy(state)
         plan['confirmed_analysis'] = route
         plan['selected_goals'] = body.goals

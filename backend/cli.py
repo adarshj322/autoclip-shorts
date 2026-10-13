@@ -5,7 +5,7 @@ autoclip — 命令行出片。
     autoclip run video.mp4                         # 用桌面应用里配好的模型
     autoclip run video.mp4 --provider ollama       # 本地 Ollama（默认 qwen2.5:7b，无需 key）
     autoclip run video.mp4 --provider lmstudio --model qwen2.5-7b-instruct
-    autoclip run video.mp4 --provider openai --base-url https://api.deepseek.com/v1 --model deepseek-chat --api-key sk-...
+    AUTOCLIP_API_KEY=sk-... autoclip run video.mp4 --provider openai --base-url https://api.deepseek.com/v1 --model deepseek-chat
     autoclip run video.mp4 --srt video.srt --min-score 0.6 --json
     autoclip list / show <project_id> / providers / doctor
     autoclip publish <project_id> --clip 2 --platform tiktok --platform youtube   # 经 Upload-Post 发到海外平台
@@ -65,55 +65,99 @@ def _add_llm_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--provider", choices=PROVIDER_CHOICES, help="dashscope / openai / gemini / deepseek / seed / kimi / glm / grok / infistar / api88，或本地预设 ollama / lmstudio")
     g.add_argument("--model", help="模型名，如 qwen-plus、gpt-4o-mini、qwen2.5:7b")
     g.add_argument("--base-url", help="OpenAI 兼容接口地址（provider=openai 时用；ollama/lmstudio 有默认值）")
-    g.add_argument("--api-key", help="API Key（本地模型可不填）。也可用环境变量 AUTOCLIP_API_KEY")
+    g.add_argument("--api-key", help="已弃用。请改用环境变量 AUTOCLIP_API_KEY；仍传入时会在 stderr 打印警告")
 
 
 def _llm_override(args: argparse.Namespace) -> LLMOverride:
+    supplied = getattr(args, "api_key", None)
+    if supplied:
+        print("警告：--api-key 已弃用，请改用环境变量 AUTOCLIP_API_KEY。", file=sys.stderr)
     return LLMOverride(
         provider=getattr(args, "provider", None),
         model=getattr(args, "model", None),
         base_url=getattr(args, "base_url", None),
-        api_key=getattr(args, "api_key", None) or os.getenv("AUTOCLIP_API_KEY"),
+        api_key=supplied or os.getenv("AUTOCLIP_API_KEY"),
     )
 
 
 # ---------------------------------------------------------------- run ---
 def cmd_produce(args: argparse.Namespace) -> int:
+    from backend.services import mcp_telemetry
     from backend.services import quick_output_runner as quick
+    started = time.perf_counter()
+    outcome = {'ok': False, 'error_code': 'failed', 'job_id': None, 'terminal': False}
     try:
         # Providers and ASR may print progress from worker threads. Keep stdout parseable
         # for scripts, just as the MCP stdio entry point keeps its protocol stream clean.
         with contextlib.redirect_stdout(sys.stderr):
             project_id = quick.start(args.source, args.platform or ['douyin'], name=args.name, srt_path=args.srt,
-                                     instruction=args.instruction, browser=args.browser, portrait_style=args.portrait_style)
+                                     instruction=args.instruction, browser=args.browser, portrait_style=args.portrait_style,
+                                     template=args.template)
             if not args.json:
                 print(f'1.5 一键出片 · {project_id} · 进度写入项目目录', file=sys.stderr)
             result = quick.wait(project_id, timeout=args.timeout)
-        result['ok'] = result['status'] in ('completed', 'partial') and not result.get('timed_out')
+        ok = result['status'] in ('completed', 'partial') and not result.get('timed_out')
+        if result.get('timed_out'):
+            error_code = 'timeout'
+        elif ok:
+            error_code = 'none'
+        else:
+            error_code = mcp_telemetry.normalize_error(result.get('status'), ok=False)
+        outcome = {'ok': ok, 'error_code': error_code, 'job_id': project_id, 'terminal': True}
+        result['ok'] = ok
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result['ok'] else 1
-    except (ValueError, FileNotFoundError) as error:
-        print(json.dumps({'ok': False, 'error': str(error)}, ensure_ascii=False))
+        return 0 if ok else 1
+    except quick.StyleDisabled as error:
+        outcome = {'ok': False, 'error_code': 'disabled', 'job_id': None, 'terminal': False}
+        print(json.dumps({'ok': False, 'error_code': 'disabled', 'error': str(error)}, ensure_ascii=False))
         return 2
+    except (ValueError, FileNotFoundError) as error:
+        outcome = {'ok': False, 'error_code': 'invalid_input', 'job_id': None, 'terminal': False}
+        print(json.dumps({'ok': False, 'error_code': 'invalid_input', 'error': str(error)}, ensure_ascii=False))
+        return 2
+    finally:
+        mcp_telemetry.record('produce', 'cli', started, **outcome)
 
 
 def cmd_outputs(args: argparse.Namespace) -> int:
+    from backend.services import mcp_telemetry
     from backend.services import quick_output_runner as quick
+    started = time.perf_counter()
+    outcome = {'ok': False, 'error_code': 'invalid_input', 'job_id': None, 'terminal': False}
     try:
-        print(json.dumps(quick.status(args.project_id, export_kits=args.export_kits), ensure_ascii=False, indent=2))
+        result = quick.status(args.project_id, export_kits=args.export_kits)
+        status = result.get('status')
+        ok = status in ('completed', 'partial', 'running', 'queued')
+        terminal = status in ('completed', 'partial', 'failed', 'interrupted', 'cancelled')
+        error_code = 'none' if ok else mcp_telemetry.normalize_error(status, ok=False)
+        outcome = {'ok': ok, 'error_code': error_code, 'job_id': args.project_id, 'terminal': terminal}
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (ValueError, FileNotFoundError) as error:
         print(json.dumps({'ok': False, 'error': str(error)}, ensure_ascii=False))
         return 2
+    finally:
+        mcp_telemetry.record('outputs', 'cli', started, **outcome)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from backend.services import mcp_telemetry
     from backend.services.local_runner import configure_llm, prepare_project, run_pipeline, summarize_project
 
+    started = time.perf_counter()
+    outcome = {'ok': False, 'error_code': 'failed', 'job_id': None, 'terminal': False}
     t0 = time.time()
+    try:
+        return _cmd_run_body(args, outcome, configure_llm, prepare_project, run_pipeline, summarize_project, t0)
+    finally:
+        mcp_telemetry.record('run', 'cli', started, **outcome)
+
+
+def _cmd_run_body(args, outcome, configure_llm, prepare_project, run_pipeline, summarize_project, t0) -> int:
     try:
         info = configure_llm(_llm_override(args))
     except Exception as e:  # noqa: BLE001
+        outcome.update(ok=False, error_code='invalid_input')
         _err(str(e))
         return 2
 
@@ -128,6 +172,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         video_in_raw = prepare_project(req, link=not args.copy)
     except FileNotFoundError as e:
+        outcome.update(ok=False, error_code='invalid_input', job_id=req.project_id)
         _err(str(e))
         return 2
 
@@ -155,6 +200,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     elapsed = time.time() - t0
 
     if result.get("status") != "succeeded":
+        from backend.services.mcp_telemetry import normalize_error
+        outcome.update(ok=False, error_code=normalize_error(result.get('error_code') or result.get('status'), ok=False),
+                       job_id=req.project_id, terminal=True)
         if args.json:
             print(json.dumps({"ok": False, "project_id": req.project_id, "error": result.get("error")}, ensure_ascii=False))
         else:
@@ -162,6 +210,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(_dim(f"日志：{os.getenv('LOG_FILE')}"), file=sys.stderr)
         return 1
 
+    outcome.update(ok=True, error_code='none', job_id=req.project_id, terminal=True)
     summary = summarize_project(req.project_id)
     summary["elapsed_sec"] = round(elapsed, 1)
     summary["llm"] = {k: info.get(k) for k in ("provider", "model", "base_url") if info.get(k)}
@@ -241,7 +290,8 @@ def cmd_providers(args: argparse.Namespace) -> int:
         ("api88", "88API Token聚合平台（赞助）", "需要 key，新用户注册赠送体验额度"),
         ("infistar", "Infistar 无限星河（赞助）", "需要 key，专属链接注册可领体验额度"),
     ] + [
-        (p.key, p.display_name, f"无需 key；默认 {p.base_url}" + (f"，默认模型 {p.default_model}" if p.default_model else ""))
+        (p.key, p.display_name, f"无需 key；默认 {p.base_url}" + (f"，默认模型 {p.default_model}" if p.default_model else "")
+         + (f"。{p.context_hint}" if p.context_hint else ""))
         for p in LOCAL_PRESETS.values()
     ]
     info = get_llm_manager().get_current_provider_info()
@@ -279,6 +329,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     llm = rep["llm"]
     llm_desc = f"{llm.get('provider')} · {llm.get('model')}" + (f" · {llm['base_url']}" if llm.get("base_url") else "")
     line(llm["ok"], "模型", llm_desc + ("" if llm["ok"] else f"  {_dim(llm.get('error') or '')}"))
+    if llm.get("context_hint"):
+        print(_dim(f"    {llm['context_hint']}"))
     return 0 if rep["ffmpeg"]["ok"] and llm["ok"] else 1
 
 
@@ -548,6 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument('--srt', help='本地 SRT 字幕文件')
     q.add_argument('--instruction', default='')
     q.add_argument('--portrait-style', choices=['auto', 'interview', 'podcast'], default='auto', help='竖版版式；画幅和文字语言仍按平台')
+    q.add_argument('--template', choices=['editorial', 'street', 'classic'], help='剪辑风格（mcp_v2_tools 开关控制，默认打开；AUTOCLIP_FLAGS=mcp_v2_tools=off 可关闭）：editorial 杂志风 / street 街头快剪 / classic 经典。结果里的 template 是实际用的风格')
     q.add_argument('--browser', choices=['chrome', 'edge', 'firefox', 'safari'])
     q.add_argument('--timeout', type=float, default=7200, help='等待秒数；超时不会取消项目')
     q.add_argument('--json', action='store_true', help='只在 stdout 输出 JSON 结果')

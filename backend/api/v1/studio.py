@@ -1,4 +1,5 @@
 """Unified creative workspace. Legacy projects are adapted, never overwritten."""
+import json
 import uuid
 from pathlib import Path
 from typing import Optional, Literal
@@ -45,6 +46,12 @@ def validate_draft(project_id, draft):
 def title_preset_thumbnail(style: Literal['comic', 'neon', 'arena', 'editorial', 'pixel', 'frosted'], v: int = Query(1, ge=1, le=6)):
     from backend.services.studio.title_art import thumbnail
     return Response(call(thumbnail, style, v), media_type='image/png', headers={'Cache-Control':'public, max-age=86400'})
+
+@router.get('/readiness')
+def import_readiness():
+    from backend.services.studio import readiness
+    return readiness.report()
+
 
 @router.get('/capabilities')
 def capabilities():
@@ -94,12 +101,15 @@ async def import_visual(
     platforms: list[str] = Form(['douyin']),
     auto_start: bool = Form(False),
     portrait_style: Literal['auto', 'interview', 'podcast'] = Form('auto'),
+    html_template: Optional[Literal['editorial', 'street', 'classic']] = Form(None),
+    recommended_template: Optional[Literal['editorial', 'street', 'classic']] = Form(None),
     brand_outro_enabled: bool = Form(True),
     subtitle: Optional[UploadFile] = File(None),
     name: str = Form('智能剪辑', max_length=200),
     url: Optional[str] = Form(None),
     browser: Optional[Literal['chrome', 'edge', 'firefox', 'safari']] = Form(None),
     video: Optional[UploadFile] = File(None),
+    features: str = Form(''),
     db: Session = Depends(get_db),
 ):
     if bool(url) == bool(video):
@@ -128,7 +138,9 @@ async def import_visual(
             await subtitle.close()
     prefs = ImportOptions(
         goal=goal, language=language, aspect=aspect, duration=duration, instruction=instruction,
-        platforms=platforms, auto_start=auto_start, portrait_style=portrait_style, branding={'outro_enabled': brand_outro_enabled},
+        platforms=platforms, auto_start=auto_start, portrait_style=portrait_style, html_template=html_template,
+        recommended_template=recommended_template,
+        branding={'outro_enabled': brand_outro_enabled},
     )
     project = ProjectService(db).create_project(ProjectCreate(name=name.strip() or '智能剪辑', project_type=ProjectType.DEFAULT, source_url=url, settings={'creative': {'goal': goal}, 'smart_import': prefs.model_dump(), 'import_staging': not prefs.auto_start, 'creative_browser': browser, 'platforms': prefs.platforms, 'brand_outro_enabled': prefs.branding.outro_enabled}))
     pid = str(project.id)
@@ -145,7 +157,15 @@ async def import_visual(
                     target.write(chunk)
             project.video_path = str(path)
             db.commit()
-        run_id = call(jobs.inspect_project, pid, prefs, url, browser)
+        snapshot = None
+        if features and len(features) <= 4000:
+            try:
+                parsed = json.loads(features)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                snapshot = parsed
+        run_id = call(jobs.inspect_project, pid, prefs, url, browser, features=snapshot)
     except Exception:
         project.status = 'failed'
         db.commit()
@@ -154,6 +174,30 @@ async def import_visual(
         if video:
             await video.close()
     return {'project_id': pid, 'analysis_run_id': run_id}
+
+
+@router.post('/template-recommend')
+async def template_recommend(
+    url: Optional[str] = Form(None),
+    header: Optional[UploadFile] = File(None),
+):
+    """Recommend an editing style from a link or a file header. No download."""
+    if url:
+        parsed = urlparse(url)
+        host = (parsed.hostname or '').lower()
+        if parsed.scheme != 'https' or parsed.username or parsed.password or not any(host == domain or host.endswith('.' + domain) for domain in ('youtube.com', 'youtu.be', 'bilibili.com', 'b23.tv')):
+            raise HTTPException(422, '仅支持 HTTPS 的 B 站或 YouTube 视频链接')
+    blob = None
+    if header is not None:
+        try:
+            blob = await header.read(1024 * 1024)
+        finally:
+            await header.close()
+    if not url and not blob:
+        raise HTTPException(422, '请提供一个视频链接或文件')
+    from backend.services.studio.template_recommend import recommend_template
+    return recommend_template(url=url, header=blob)
+
 
 @router.get('/{project_id}')
 def workspace(project_id: str, db: Session = Depends(get_db)):
@@ -451,7 +495,7 @@ def framing_status():
 @router.post('/framing/install')
 def framing_install():
     from backend.services.studio import framing
-    return {**framing.start_install(), **framing.get_status()}
+    return {**framing.start_install(manual=True), **framing.get_status()}
 
 @router.post('/{project_id}/auto-frame')
 def auto_frame(project_id: str, body: Draft, db: Session = Depends(get_db)):
@@ -460,7 +504,7 @@ def auto_frame(project_id: str, body: Draft, db: Session = Depends(get_db)):
     from backend.services.studio import framing
     project_or_404(project_id, db)
     if not framing.is_installed():
-        raise HTTPException(409, '人物识别组件未安装')
+        raise HTTPException(409, framing.unavailable_reason())
     video = call(jobs.source, project_id)
     info = _probe(video)
     if not info.get('width') or not info.get('height'):

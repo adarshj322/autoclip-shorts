@@ -33,7 +33,7 @@ const SNAPSHOT={
 test('generation summary counts templates, framing and fallbacks without any content',()=>{
  const summary=workflow.generationSummary(SNAPSHOT)
  assert.deepEqual({...summary},{variant_count:3,completed_variant_count:1,failed_variant_count:1,on_demand_variant_count:1,skipped_variant_count:1,platform_count:2,
-  interview_count:1,podcast_count:1,landscape_count:0,speaker_framed_count:1,full_frame_count:1,framing_pending_count:0,framing_captions_count:0,
+  interview_count:1,podcast_count:1,landscape_count:0,editorial_count:0,street_count:0,classic_count:2,html_downgrade_count:0,speaker_framed_count:1,full_frame_count:1,framing_pending_count:0,framing_captions_count:0,
   portrait_style:undefined,brand_outro_enabled:undefined,outro_applied_count:0,outro_fallback_count:0,outro_unknown_count:1,packaging_fallback_count:1,trimmed_count:1,burned_captions:false,duration_ms:240000})
  const props=workflow.safeStudioProperties({...summary,title:'Private title',name:'Sam Altman',template:'interview_zh',packaging_style:'boxed',framing:'speaker'})
  assert.equal(JSON.stringify(props).includes('Private'),false)
@@ -89,6 +89,26 @@ test('automatic production failures report a safe code once without sending priv
  assert.equal(finished.length,1)
  assert.equal(finished[0].props.error_code,'whisper_not_installed')
  assert.equal(JSON.stringify(finished).includes('private'),false)
+})
+
+test('automatic failures report the failed stage, HTTP status and route, rejecting unknown values',()=>{
+ const {t,events}=tracker();t.watch('studio-generation','p1')
+ const state={generation:{status:'failed',error_code:'provider_error',failure_stage:'screening',http_status:400,error:'private body'},
+  analysis:{status:'failed',phase:'screening',error_code:'provider_error'},plan:{id:'p',mode:'ai',recommended_analysis:'visual'}}
+ t.observeStudio(t.list()[0],state)
+ const props=events.find(e=>e.name==='studio_generation_finished').props
+ assert.equal(props.failure_stage,'screening');assert.equal(props.http_status,400)
+ assert.equal(props.route,'visual');assert.equal(props.recommendation_mode,'ai')
+ assert.equal(JSON.stringify(props).includes('private'),false)
+ const bad=workflow.safeStudioProperties({failure_stage:'private-stage',http_status:200,route:'private-route'})
+ assert.equal(bad.failure_stage,undefined);assert.equal(bad.http_status,undefined);assert.equal(bad.route,undefined)
+ const {t:t2,events:e2}=tracker();t2.watch('studio-generation','p1')
+  t2.observeStudio(t2.list()[0],{...SNAPSHOT,generation:{...SNAPSHOT.generation,status:'completed',failure_stage:'render',http_status:500}})
+  const done=e2.find(e=>e.name==='studio_generation_finished').props
+  assert.equal(done.failure_stage,undefined);assert.equal(done.http_status,undefined);assert.equal(done.route,'subtitle')
+  const {t:t3,events:e3}=tracker();t3.watch('studio-generation','p1')
+  t3.observeStudio(t3.list()[0],{generation:{status:'failed',error_code:'timeout',failure_stage:'render',route:'subtitle'},analysis:{status:'failed'}})
+  assert.equal(e3.find(e=>e.name==='studio_generation_finished').props.route,'subtitle')
 })
 
 test('old automatic failures use the analysis code and reject unrecognized codes',()=>{

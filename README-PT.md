@@ -19,13 +19,13 @@ O app é grátis; modelos cloud cobram por uso. Ajuste no editor quando precisar
 
 <a href="https://trendshift.io/repositories/25801"><img src="https://trendshift.io/api/badge/repositories/25801" alt="AutoClip — GitHub Trending" width="250" height="55"></a>
 
-**[Baixar desktop](https://github.com/zhouxiaoka/autoclip/releases/latest)** · [Casos](https://zhouxiaoka.github.io/autoclip_intro/cases/) · [Início rápido](#início-rápido) · [Documentação](#documentação) · [Problema](https://github.com/zhouxiaoka/autoclip/issues/new/choose)
+**[Site](https://zhouxiaoka.github.io/autoclip_intro/)** · **[Baixar desktop](https://github.com/zhouxiaoka/autoclip/releases/latest)** · [Casos](https://zhouxiaoka.github.io/autoclip_intro/cases/) · [Pesquisa](docs/research/2026-10-what-drives-views/article-en.md) · [Início rápido](#início-rápido) · [Documentação](#documentação) · [Problema](https://github.com/zhouxiaoka/autoclip/issues/new/choose)
 
 [简体中文](README.md) · [English](README-EN.md) · [日本語](README-JA.md) · [한국어](README-KO.md) · [Español](README-ES.md) · **Português** · [Русский](README-RU.md) · [Français](README-FR.md)
 
 </div>
 
-**[1.5.0 foi lançado oficialmente](https://github.com/zhouxiaoka/autoclip/releases/tag/v1.5.0)**, com desktop, CLI e MCP atualizados. Veja o [changelog](CHANGELOG.md) para produção automática, paginação de legendas, enquadramento e fila de vídeos longos. Atualize instalações antigas.
+**[A versão mais recente](https://github.com/zhouxiaoka/autoclip/releases/latest)** é a que `autoclip --version` mostra, com desktop, CLI e MCP atualizados. Veja o [changelog](CHANGELOG.md) para produção automática, paginação de legendas, enquadramento e fila de vídeos longos. Atualize instalações antigas.
 
 ## Cortes reais
 
@@ -211,7 +211,7 @@ Corte e render ficam no computador. Análise cloud envia legendas e texto releva
 3. **Link e plataforma.** Comece com entrevista ou podcast legendado e escolha layout vertical. Sem legendas, prepare Whisper / SenseVoice ou configure transcrição cloud nas configurações.
 4. **Revise e salve.** Confira legendas, quadro e conteúdo, depois baixe o kit ou conecte uma conta para postar. Gere alternativas quando precisar de mais clipes.
 
-Intel Mac / Linux podem usar Docker ou CLI. Veja o [guia de instalação](docs/USER_INSTALLATION_GUIDE.en.md) e a [1.5.0 Release](https://github.com/zhouxiaoka/autoclip/releases/tag/v1.5.0) para requisitos, primeira abertura e escopo de validação.
+Intel Mac / Linux podem usar Docker ou CLI. Veja o [guia de instalação](docs/USER_INSTALLATION_GUIDE.en.md) e a [Release mais recente](https://github.com/zhouxiaoka/autoclip/releases/latest) para requisitos, primeira abertura e escopo de validação.
 
 [Guia de instalação](docs/USER_INSTALLATION_GUIDE.en.md) · [Problemas](docs/FAQ.en.md)
 
@@ -238,13 +238,30 @@ Para IP de rede ou domínio próprio, adicione o frontend a `AUTOCLIP_ALLOWED_OR
 
 **CLI / MCP**
 
-Python 3.10+ (3.11 recomendado), FFmpeg e FFprobe no PATH; Redis não é necessário. Baixe o [ZIP oficial CLI / MCP](https://github.com/zhouxiaoka/autoclip/releases/download/v1.5.0/autoclip-1.5.0-cli-mcp.zip), extraia e execute naquele diretório:
+Python 3.10+ (3.11 recomendado), FFmpeg e FFprobe no PATH; Redis não é necessário. Baixe o [ZIP oficial CLI / MCP](https://github.com/zhouxiaoka/autoclip/releases/latest), extraia e execute naquele diretório:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 python -m pip install -r requirements.txt
-python -m pip install --force-reinstall --no-deps autoclip-1.5.0-py3-none-any.whl
+python -m pip install --force-reinstall --no-deps autoclip_mcp-*-py3-none-any.whl
+```
+
+Sem o ZIP, instale com um comando. Instalar a partir do código clonado continua disponível:
+
+```bash
+# 一行安装
+uvx autoclip-mcp
+npx skills add zhouxiaoka/autoclip
+```
+
+```bash
+# 备选：在已克隆的仓库根目录从源码安装
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip install --no-deps .
+autoclip --version
 ```
 
 Os comandos acima são para macOS / Linux. No Windows, crie com `py -m venv venv` e ative com `.\venv\Scripts\Activate.ps1`; depois use os mesmos comandos `python -m pip`.
@@ -329,7 +346,7 @@ Entrevistas, podcasts, cursos e vídeos falados são os principais casos validad
 <details>
 <summary>Por que não saiu nenhum clipe?</summary>
 
-Confira transcrição, modelo, FFmpeg, disco e regras da plataforma. YouTube longo exige clipes completos de no mínimo 180 segundos; use Shorts/Bilibili para fontes curtas. Inclua versão 1.5.0, OS, duração, modelo e logs sem segredos em [problemas conhecidos](https://github.com/zhouxiaoka/autoclip/issues/96).
+Confira transcrição, modelo, FFmpeg, disco e regras da plataforma. YouTube longo exige clipes completos de no mínimo 180 segundos; use Shorts/Bilibili para fontes curtas. Inclua a versão de `autoclip --version`, OS, duração, modelo e logs sem segredos em [problemas conhecidos](https://github.com/zhouxiaoka/autoclip/issues/96).
 
 </details>
 
@@ -343,6 +360,7 @@ Confira transcrição, modelo, FFmpeg, disco e regras da plataforma. YouTube lon
 | Hospedar e automatizar | [Docker](docs/DOCKER.en.md) · [CLI / MCP](docs/CLI_AND_MCP.md) (chinês) · [Agent skill](skills/autoclip/SKILL.md) (chinês) · [OpenCode](docs/OPENCODE.en.md) |
 | Modelos e falhas | [Modelos](docs/MULTI_LLM_PROVIDER_GUIDE.md) (chinês) · [FAQ](docs/FAQ.en.md) |
 | Versões, roteiro, privacidade | [Changelog](CHANGELOG.md) · [Roteiro](ROADMAP.md) (chinês) · [Quadro](docs/COMMUNITY_BOARD.md) (chinês) · [Privacidade](docs/PRIVACY.en.md) |
+| Pesquisa | [Nota de pesquisa nº 1](docs/research/2026-10-what-drives-views/article-en.md) · [中文](docs/research/2026-10-what-drives-views/article-zh.md) |
 | Contribuir e traduzir | [Contribuir](CONTRIBUTING.md) (chinês) · [Traduções](docs/i18n.md) (chinês) |
 
 ## Contribuir

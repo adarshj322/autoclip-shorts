@@ -767,6 +767,7 @@ export interface WhisperRuntimeStatus {
   status: 'unknown' | 'not_installed' | 'installing' | 'installed' | 'error'
   progress: number
   message: string
+  error_code?: string
   log_tail?: string
   platform_supported: boolean
   packages: string[]
@@ -783,6 +784,14 @@ export interface WhisperModel {
   downloadProgress?: number | null
   localPath?: string | null
   errorMessage?: string | null
+  source?: 'huggingface' | 'hf-mirror' | 'custom' | null
+}
+
+/** 200 installed: already on disk. 202 downloading: started in the background; poll the model status. */
+export interface WhisperModelDownload {
+  status: 'installed' | 'downloading'
+  model: string
+  message: string
 }
 
 // 语音识别 / Whisper 运行时与模型管理
@@ -791,7 +800,7 @@ export const speechApi = {
   installRuntime: (): Promise<{ started: boolean; message: string }> => api.post('/whisper/install'),
   uninstallRuntime: (): Promise<{ success: boolean; message: string }> => api.post('/whisper/uninstall'),
   getModels: (): Promise<WhisperModel[]> => api.get('/whisper-models'),
-  downloadModel: (model: string): Promise<unknown> => api.post('/whisper-models/download', { model }),
+  downloadModel: (model: string): Promise<WhisperModelDownload> => api.post('/whisper-models/download', { model }),
   deleteModel: (model: string): Promise<unknown> => api.delete(`/whisper-models/${model}`),
 }
 

@@ -17,14 +17,17 @@ class PipelineFailure(RuntimeError):
     hint:  用户下一步能做什么（去哪个设置项、装什么），追加在错误正文后面。
     """
 
-    def __init__(self, stage: str, message: str, hint: str = "", code: str = ""):
+    def __init__(self, stage: str, message: str, hint: str = "", code: str = "", http_status: int | None = None):
         super().__init__(message)
         self.stage = stage
         self.hint = hint
+        # 上游 HTTP 状态码（仅 400–599 的整数）；没有链上原始异常时（如时间线汇总失败）用它带出状态码。
+        self.http_status = http_status
         # 稳定机器码。前端用来打开对应设置页，或避免打开错误的设置页。
         # llm_not_configured：没有可用提供商 / 缺少 API Key / 连接测试没通过
         # whisper_not_installed | whisper_install_failed | transcription_empty | subtitle_setup
         # timeline_empty：有效候选被时长筛选清空（不要再指到「设置 → 模型」）
+        # source_too_short | source_no_audio：源视频本身不能走字幕路线（media_precheck），用户输入，不上报
         self.code = code
 
     @property
@@ -43,6 +46,14 @@ HINT_BRING_OWN_KEY = (
     "密钥在该提供商的控制台申请，只保存在这台机器上。"
 )
 CODE_LLM_NOT_CONFIGURED = "llm_not_configured"
+# Environment failures of a model call: one fixed, translatable sentence for the user
+# (catalog key in all 8 locales). The provider's own text ("Connection error.",
+# "Request timed out.") stays in the log only (RC156 Win QA c5).
+MODEL_CALL_MESSAGES = {
+    "connection": "无法连接模型服务，请检查接口地址与网络；本地模型请先启动服务后重试。",
+    "timeout": "模型响应超时，请检查服务和网络后重试；本地模型请确认服务仍在运行。",
+    "rate_limited": "提供商限制了请求频率或额度，请检查配额并稍后重试。",
+}
 
 
 def looks_like_llm_setup_error(text: str) -> bool:
@@ -115,6 +126,29 @@ def model_call_error_code(error: Exception) -> str:
     return "provider_error"
 
 
+def http_status_of(error: BaseException | None) -> int | None:
+    """沿异常链找第一个 400–599 的整数 HTTP 状态码，不读正文、URL 或密钥。
+
+    流水线把提供商异常包成 PipelineFailure(...) from error，状态码在 __cause__ 上；
+    隐式链（处理异常时又抛异常）走 __context__，与 traceback 的展示规则一致。
+    """
+    seen: set[int] = set()
+    current = error
+    while current is not None and id(current) not in seen and len(seen) < 32:
+        seen.add(id(current))
+        for attr in ("http_status", "status_code"):
+            status = getattr(current, attr, None)
+            if type(status) is int and 400 <= status <= 599:
+                return status
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return None
+
+
 def timeline_failure_from_report(topic_count: int, report: dict) -> PipelineFailure:
     """Use current-run observations, not a guess that an empty timeline is short."""
     chunks = report.get("chunks", [])
@@ -133,14 +167,15 @@ def timeline_failure_from_report(topic_count: int, report: dict) -> PipelineFail
         code = failed_calls[-1]["error_code"]
         hints = {
             "authentication": "请检查「设置 → 模型」中的密钥、模型权限和提供商配置，再测试连接。",
-            "rate_limited": "提供商限制了请求频率或额度，请检查配额并稍后重试。",
-            "timeout": "模型响应超时，请检查服务和网络后重试；本地模型请确认服务仍在运行。",
-            "connection": "无法连接模型服务，请检查接口地址与网络；本地模型请先启动服务后重试。",
+            "rate_limited": MODEL_CALL_MESSAGES["rate_limited"],
+            "timeout": MODEL_CALL_MESSAGES["timeout"],
+            "connection": MODEL_CALL_MESSAGES["connection"],
             "provider_error": "提供商未完成时间线请求，请检查模型可用性和接口兼容性后重试。",
         }
         return PipelineFailure(
             "ANALYZE", f"时间线模型调用失败：{len(failed_calls)}/{len(chunks)} 个字幕块调用失败，本次没有可用候选。",
             hints[code] + "大纲成功或测试连接成功，不能保证后续长文本请求也成功。", code=code,
+            http_status=failed_calls[-1].get("http_status"),
         )
     if chunks and all(chunk.get("outcome") == "missing_subtitles" for chunk in chunks):
         return PipelineFailure("ANALYZE", "时间线所需的字幕分块无法读取。",
@@ -165,11 +200,22 @@ def timeline_failure_from_report(topic_count: int, report: dict) -> PipelineFail
     return empty_timeline_failure(topic_count)
 
 
+def cloud_transcription_failure(message: str) -> PipelineFailure:
+    """CloudTranscriptionError carries only our safe public text, never a provider body."""
+    return PipelineFailure(
+        "SUBTITLE", f"云端转写失败：{message}",
+        "到「设置 → AI模型」检查所选云端转写的服务、密钥和模型；确认服务可用后重试，或导入 .srt 字幕。",
+        code="provider_error",
+    )
+
+
 def missing_subtitle_failure() -> PipelineFailure:
-    """视频没有字幕，自动转写也没留下 srt。按当前 Whisper 状态区分下一步。"""
+    """视频没有字幕，自动转写也没留下 srt。按所选转写服务区分下一步。"""
     from backend.services import whisper_runtime
     from backend.services.ai_model_settings import load
     settings = load()
+    if settings and settings.transcription and settings.transcription.provider == 'cloud':
+        return cloud_transcription_failure("本次未获得可用转写结果。")
     if settings and settings.transcription and settings.transcription.provider == 'sensevoice_local':
         return PipelineFailure('SUBTITLE', '没有字幕可分析：SenseVoice 本次没有生成可用字幕。',
                                '到「设置 → 转写」检查 SenseVoiceSmall 是否就绪，或导入 .srt 字幕后重试。',
@@ -202,6 +248,11 @@ def missing_subtitle_failure() -> PipelineFailure:
 def failure_from_speech_error(message: str) -> PipelineFailure:
     """转写异常收成同一套失败码，不再把「设置 → 语音识别」和「设置 → 转写」叠在一起。"""
     text = (message or "").strip().replace("设置 → 语音识别", "设置 → 转写")
+    from backend.pipeline import media_precheck
+
+    if media_precheck.is_no_audio_text(text):
+        # 视频本身没有音轨：不是转写设置的问题，不要指到「设置 → 转写」。
+        return media_precheck.no_audio_failure("SUBTITLE")
     if 'SenseVoice' in text:
         return PipelineFailure('SUBTITLE', text,
                                '' if '设置 → 转写' in text else '到「设置 → 转写」检查 SenseVoiceSmall，或导入 .srt 字幕。',

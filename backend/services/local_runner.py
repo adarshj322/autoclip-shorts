@@ -191,12 +191,15 @@ def check_llm_connection() -> Dict[str, Any]:
             preset = LOCAL_PRESETS.get(info.get("provider") or "")
             tip = f"请先启动 {preset.display_name.split('（')[0]}（{preset.docs_url}）" if preset else "请检查地址是否正确、服务是否已启动"
             return {"ok": False, **info, "error": f"{base_url} 不可达：{type(e).__name__}。{tip}"}
+    from backend.core.local_presets import context_hint_for
+    hint = context_hint_for(m.settings)
     try:
         ok = bool(m.current_provider.test_connection())
         return {
             "ok": ok,
             **info,
             "error": None if ok else "连接测试失败。请到「设置 → 模型」核对自备的密钥和模型名后再试。",
+            **({"context_hint": hint} if hint else {}),
         }
     except Exception as e:  # noqa: BLE001
         return {"ok": False, **info, "error": str(e)[:300]}
@@ -521,6 +524,13 @@ def environment_report() -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         report["whisper"] = {"ok": False, "error": str(e)}
     report["llm"] = check_llm_connection()
+    try:
+        # Same visual check as the app's readiness (capability=auto resolves like the pipeline).
+        from backend.services import ai_model_settings as ai_models
+        from backend.services.studio.readiness import _visual
+        report["visual"] = _visual(ai_models.for_editing())
+    except Exception as e:  # noqa: BLE001
+        report["visual"] = {"ok": False, "error": type(e).__name__}
     return report
 
 

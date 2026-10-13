@@ -17,6 +17,9 @@ function load(name, mocks = {}, globals = {}) {
     __env: { DEV: false, VITE_PUBLIC_POSTHOG_KEY: 'test-only-not-a-real-key' },
     require: (id) => {
       if (id in mocks) return mocks[id]
+      if (id === '../utils/apiConfig') {
+        return { apiConfigManager: { getBaseUrl: () => '/api/v1', addListener: () => () => {} } }
+      }
       throw new Error(`Unexpected dependency: ${id}`)
     }, ...globals }, { filename: file })
   return module.exports
@@ -129,7 +132,7 @@ test('persisted opt-out skips SDK initialization and can be enabled later withou
   assert.equal(ph.captureBusinessEvent('disabled'), false)
   assert.deepEqual(calls, [])
   ph.setAnalyticsEnabled(true)
-  assert.equal(config.advanced_disable_flags, true)
+  assert.equal(config.advanced_disable_flags, false)
   assert.equal(ph.captureBusinessEvent('enabled'), true)
   ph.setAnalyticsEnabled(false)
   assert.equal(ph.captureBusinessEvent('disabled-again'), false)
@@ -137,6 +140,82 @@ test('persisted opt-out skips SDK initialization and can be enabled later withou
   assert.equal(calls.filter(call => call === 'init').length, 1)
   assert.equal(calls.filter(call => call === 'capture').length, 1)
   assert.equal(storage.getItem('autoclip.analytics.optOut'), 'false')
+})
+test('the anonymous distinct id is stored once for backend events', async () => {
+  const storage = memory()
+  const puts = []
+  const id = '018f6b2a-7c3d-7b2a-8c11-111111111111'
+  const sdk = {
+    init(_key, cfg) { cfg.loaded?.({ onFeatureFlags() {} }) },
+    capture() { return {} },
+    get_distinct_id: () => id,
+    opt_in_capturing() {},
+    opt_out_capturing() {},
+  }
+  const ph = load('posthog', { 'posthog-js': sdk, './workflow': core }, {
+    localStorage: storage,
+    window: {},
+    fetch: (url, opts) => {
+      puts.push({ url, body: opts.body })
+      return Promise.resolve({ ok: true })
+    },
+  })
+  ph.initAnalytics()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(puts.length, 1)
+  assert.equal(puts[0].url, '/api/v1/settings/analytics-identity')
+  assert.equal(JSON.parse(puts[0].body).distinct_id, id)
+  ph.setAnalyticsEnabled(true)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(puts.length, 1)
+})
+test('turning analytics off pauses flag reloads and never asks for flags while opted out', () => {
+  const storage = memory()
+  const calls = []
+  const sdk = {
+    init(_key, cfg) { calls.push(['init', cfg.advanced_disable_flags]) },
+    capture() { return {} },
+    opt_out_capturing() { calls.push(['out']) },
+    opt_in_capturing() { calls.push(['in']) },
+    set_config(cfg) { calls.push(['config', cfg.advanced_disable_flags]) },
+    reloadFeatureFlags() { calls.push(['reload']) },
+    featureFlags: { setReloadingPaused(paused) { calls.push(['pause', paused]) }, getFlagVariants() { calls.push(['variants']); return { remember_platforms: true } } },
+    onFeatureFlags() { calls.push(['listen']) },
+  }
+  const ph = load('posthog', { 'posthog-js': sdk, './workflow': core }, { localStorage: storage, window: {} })
+  assert.equal(ph.readLoadedFlag('remember_platforms'), undefined)
+  ph.initAnalytics()
+  // W157-N3: values persisted by an earlier session are ignored until this session's flags arrive.
+  assert.equal(ph.readLoadedFlag('remember_platforms'), undefined)
+  ph.markRemoteFlagsResponse(true)
+  assert.equal(ph.readLoadedFlag('remember_platforms'), undefined)
+  ph.markRemoteFlagsResponse()
+  assert.equal(ph.readLoadedFlag('remember_platforms'), true)
+  ph.setAnalyticsEnabled(false)
+  assert.equal(ph.readLoadedFlag('remember_platforms'), undefined)
+  assert.equal(calls.some(call => call[0] === 'reload'), false)
+  assert.deepEqual(calls.filter(call => call[0] === 'config'), [['config', true]])
+  assert.deepEqual(calls.filter(call => call[0] === 'pause'), [['pause', true]])
+  ph.setAnalyticsEnabled(true)
+  assert.equal(calls.filter(call => call[0] === 'reload').length, 1)
+  assert.equal(ph.readLoadedFlag('remember_platforms'), true)
+})
+test('W157-N3: flags restored from posthog persistence are not read before the onFeatureFlags response', () => {
+  const storage = memory()
+  let listener = null
+  const sdk = {
+    init(_key, cfg) { cfg.loaded?.(sdk) },
+    capture() { return {} }, opt_out_capturing() {}, opt_in_capturing() {}, set_config() {}, reloadFeatureFlags() {},
+    register_for_session() {}, setPersonPropertiesForFlags() {},
+    featureFlags: { setReloadingPaused() {}, getFlagVariants() { return { pkg_templates_v1: false } } },
+    onFeatureFlags(cb) { listener = cb },
+  }
+  const ph = load('posthog', { 'posthog-js': sdk, './workflow': core }, { localStorage: storage, window: {} })
+  ph.initAnalytics()
+  assert.equal(ph.readLoadedFlag('pkg_templates_v1'), undefined)
+  assert.equal(typeof listener, 'function')
+  listener({}, {}, { errorsLoading: false })
+  assert.equal(ph.readLoadedFlag('pkg_templates_v1'), false)
 })
 test('opt-out override prevents SDK initialization even when localStorage is unavailable', () => {
   let initialized = 0
@@ -307,6 +386,23 @@ test('rescreen ignores an old plan while running and replaces the old local watc
  assert.equal(core.routeName('/import/private?token=secret'),'/import/:id')
  assert.equal(core.routeName('/project/private/studio/secret'),'/project/:id/studio/:draftId')
 })
+test('the UI does not emit studio_qa_checked; the backend owns that event', () => {
+  const s = setup()
+  s.tracker.watch('studio-variant', 'variant-1', 'project', undefined, {}, false, 'job-1')
+  const qa = { mode: 'shadow', checks: [
+    { checker: 'avsync', outcome: 'fail', bucket: '80_200', duration_ms: 12 },
+    { checker: 'ending', outcome: 'fail', bucket: 'mid_word', duration_ms: 3, text: 'private caption' },
+    { checker: 'loudness', outcome: 'pass', bucket: 'in_target', duration_ms: 40 },
+  ] }
+  const snapshot = { output_variants: [{ id: 'variant-1', draft_id: 'd', render_job_id: 'job-1', strategy_id: 'douyin', status: 'completed', qa }] }
+  const watch = s.tracker.list()[0]
+  s.tracker.observeStudio(watch, snapshot)
+  s.tracker.observeStudio(watch, snapshot)
+  assert.equal(s.events.filter(item => item.event === 'studio_qa_checked').length, 0)
+  assert.equal(JSON.stringify(s.events).includes('private'), false)
+  assert.equal(s.events.some(item => item.event === 'studio_variant_finished'), true)
+})
+
 test('immutable export repeated acceptance does not recount its completion',()=>{
  const s=setup();s.tracker.watch('studio-export','j','p');const w=s.tracker.list()[0]
  s.tracker.observeStudio(w,{jobs:[{job_id:'j',status:'completed',duration_ms:20}]})
@@ -540,4 +636,43 @@ test('portrait import and saved outro preference retain explicit enums and confi
  assert.equal(s.events.length,2);assert.equal(s.events[1].props.brand_outro_enabled,false)
  const late=experience.beginExperience('output_branding_save',{brand_outro_enabled:true});const n=s.events.length;s.tracker.clear();late('completed')
  assert.equal(s.events.length,n);assert.equal(JSON.stringify(props).includes('private'),false)
+})
+
+test('every flag evaluation carries app_version as a semver flag person property', () => {
+  const storage = memory()
+  const calls = []
+  const sdk = {
+    init(_key, cfg) { calls.push(['init']); cfg.loaded?.(sdk) },
+    capture() { return {} },
+    opt_out_capturing() {}, opt_in_capturing() {},
+    set_config() {},
+    register(props) { calls.push(['register', props.app_version]) },
+    setPersonPropertiesForFlags(props, reload) { calls.push(['flagprops', props.app_version, reload]) },
+    reloadFeatureFlags() { calls.push(['reload']) },
+    featureFlags: { setReloadingPaused() {}, getFlagVariants() { return {} } },
+    onFeatureFlags() {},
+  }
+  const file = path.join(__dirname, '../src/analytics/posthog.ts')
+  const source = fs.readFileSync(file, 'utf8').replaceAll('import.meta.env', '__env')
+  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText
+  const module = { exports: {} }
+  vm.runInNewContext(js, { exports: module.exports, module, console, localStorage: storage, window: {},
+    __env: { DEV: false, VITE_PUBLIC_POSTHOG_KEY: 'test-only-not-a-real-key', VITE_APP_VERSION: 'v1.5.7' },
+    require: (id) => {
+      if (id === 'posthog-js') return { __esModule: true, default: sdk }
+      if (id === './workflow') return core
+      if (id === '../utils/apiConfig') return { apiConfigManager: { getBaseUrl: () => '/api/v1', addListener: () => () => {} } }
+      throw new Error(`Unexpected dependency: ${id}`)
+    } }, { filename: file })
+  const ph = module.exports
+  assert.equal(JSON.stringify(ph.flagPersonProperties()), '{"app_version":"1.5.7"}')
+  ph.initAnalytics()
+  // Set inside loaded, before the SDK's first flag request, without an extra reload.
+  assert.equal(JSON.stringify(calls.slice(0, 3)), JSON.stringify([['init'], ['register', '1.5.7'], ['flagprops', '1.5.7', false]]))
+  ph.setAnalyticsEnabled(false)
+  calls.length = 0
+  ph.setAnalyticsEnabled(true)
+  const props = calls.findIndex(call => call[0] === 'flagprops')
+  const reload = calls.findIndex(call => call[0] === 'reload')
+  assert.ok(props >= 0 && reload > props, JSON.stringify(calls))
 })

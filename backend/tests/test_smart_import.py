@@ -5,7 +5,17 @@ import pytest
 from pydantic import ValidationError
 from backend.tests.test_studio import root, source, client
 from backend.services.studio import intelligence, jobs, store, planning
+from backend.services.studio.features import resolve_features
 from backend.services.studio.models import ImportOptions
+
+
+@pytest.fixture(autouse=True)
+def full_length_synthetic_source(monkeypatch):
+    # The shared `source` fixture is a 3 s clip standing in for a normal-length video. The
+    # too-short precheck (RC156 Win QA #10) has its own tests in test_media_precheck.py.
+    from backend.pipeline import media_precheck
+    monkeypatch.setattr(media_precheck, 'too_short', lambda duration: False)
+
 
 @pytest.fixture(autouse=True)
 def explicit_visual_preferences(monkeypatch):
@@ -213,6 +223,9 @@ def test_import_persists_platform_and_branding_contract_without_auto_start(clien
         'branding': {'outro_enabled': False, 'outro_version': 'v1'},
         'auto_start': False,
         'portrait_style': 'auto',
+        'template': 'classic',
+        'requested_template': 'classic',
+        'features': resolve_features(None),
         'status': 'awaiting_confirmation',
         'created_at': state['generation']['created_at'],
     }
@@ -718,6 +731,39 @@ def test_current_studio_accepts_shared_youtube_urls(client, source, monkeypatch,
     assert response.status_code == 200
     assert seen == [url]
     assert store.read(response.json()['project_id'])['analysis']['status'] == 'awaiting_confirmation'
+
+
+def test_link_import_refused_by_site_records_source_blocked_in_chinese(client, monkeypatch):
+    # RC156 Win QA #9: Bilibili answered HTTP 412 from a datacenter IP. The failure was
+    # error_code=unexpected and the UI showed yt-dlp's raw English text.
+    import yt_dlp
+    from backend.core import sentry_setup
+    from backend.utils import download_recovery
+    raw = ('ERROR: [BiliBili] 1yf8XzmEV8: Unable to download webpage: HTTP Error 412: Precondition Failed '
+           '(caused by <HTTPError 412: Precondition Failed>)')
+    class Refusing:
+        def __init__(self, options): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def download(self, urls): raise yt_dlp.utils.DownloadError(raw)
+    monkeypatch.setattr(download_recovery.yt_dlp, 'YoutubeDL', Refusing)
+    monkeypatch.setattr(jobs, 'executor', Immediate())
+    reported = []
+    monkeypatch.setattr(jobs, 'capture_studio_exception', lambda error, phase, **kw: reported.append(
+        sentry_setup.studio_error_code(error)))
+    response = client.post('/studio/import', data={'url': 'https://www.bilibili.com/video/BV1yf8XzmEV8/',
+                                                   'goal': 'content', 'auto_start': 'true'})
+    assert response.status_code == 200, response.text
+    state = store.read(response.json()['project_id'])
+    assert state['analysis']['status'] == 'failed'
+    assert state['analysis']['error_code'] == 'source_blocked'
+    assert state['analysis']['error'] == download_recovery.SOURCE_BLOCKED_HINT
+    generation = state['generation']
+    assert generation['status'] == 'failed' and generation['error_code'] == 'source_blocked'
+    assert generation['failure_stage'] == 'ingest' and generation['http_status'] == 412
+    assert 'Precondition' not in generation['error'] and 'BiliBili' not in generation['error']
+    # The worker still hands it to the reporter, which drops source_blocked (see test_sentry_setup).
+    assert reported == ['source_blocked']
 
 
 def test_studio_content_preserves_structured_pipeline_failure(monkeypatch, tmp_path):

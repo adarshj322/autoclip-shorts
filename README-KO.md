@@ -19,13 +19,13 @@
 
 <a href="https://trendshift.io/repositories/25801"><img src="https://trendshift.io/api/badge/repositories/25801" alt="AutoClip — GitHub Trending" width="250" height="55"></a>
 
-**[데스크톱 받기](https://github.com/zhouxiaoka/autoclip/releases/latest)** · [사례](https://zhouxiaoka.github.io/autoclip_intro/cases/) · [빠른 시작](#빠른-시작) · [문서](#문서) · [이슈](https://github.com/zhouxiaoka/autoclip/issues/new/choose)
+**[웹사이트](https://zhouxiaoka.github.io/autoclip_intro/)** · **[데스크톱 받기](https://github.com/zhouxiaoka/autoclip/releases/latest)** · [사례](https://zhouxiaoka.github.io/autoclip_intro/cases/) · [연구](docs/research/2026-10-what-drives-views/article-en.md) · [빠른 시작](#빠른-시작) · [문서](#문서) · [이슈](https://github.com/zhouxiaoka/autoclip/issues/new/choose)
 
 [简体中文](README.md) · [English](README-EN.md) · [日本語](README-JA.md) · **한국어** · [Español](README-ES.md) · [Português](README-PT.md) · [Русский](README-RU.md) · [Français](README-FR.md)
 
 </div>
 
-**[1.5.0 정식 출시](https://github.com/zhouxiaoka/autoclip/releases/tag/v1.5.0)**. 데스크톱·CLI·MCP를 함께 업데이트했습니다. 자동 제작, 자막 페이지 분할, 인물 구도, 긴 영상 대기열 수정은 [변경 기록](CHANGELOG.md)을 확인하고 이전 버전에서 업그레이드하세요.
+**[최신 정식 릴리스](https://github.com/zhouxiaoka/autoclip/releases/latest)**. 버전은 `autoclip --version`이 보여 주는 값입니다. 데스크톱·CLI·MCP를 함께 업데이트했습니다. 자동 제작, 자막 페이지 분할, 인물 구도, 긴 영상 대기열 수정은 [변경 기록](CHANGELOG.md)을 확인하고 이전 버전에서 업그레이드하세요.
 
 ## 실제 완성 클립
 
@@ -211,7 +211,7 @@
 3. **링크와 플랫폼 선택.** 자막이 있는 인터뷰나 팟캐스트로 시작하고 세로 레이아웃을 고르세요. 자막이 없으면 설정에서 Whisper / SenseVoice를 준비하거나 클라우드 전사를 설정하세요.
 4. **확인 후 저장.** 자막·구도·내용의 완결성을 확인하고 게시 패키지를 저장하거나 계정을 연결해 게시하세요. 더 필요하면 대체 후보를 제작하세요.
 
-Intel Mac / Linux는 Docker 또는 CLI를 이용할 수 있습니다. 요구 사항, 첫 실행 안내, 검증 범위는 [설치 가이드](docs/USER_INSTALLATION_GUIDE.en.md)와 [1.5.0 Release](https://github.com/zhouxiaoka/autoclip/releases/tag/v1.5.0)를 참고하세요.
+Intel Mac / Linux는 Docker 또는 CLI를 이용할 수 있습니다. 요구 사항, 첫 실행 안내, 검증 범위는 [설치 가이드](docs/USER_INSTALLATION_GUIDE.en.md)와 [최신 Release](https://github.com/zhouxiaoka/autoclip/releases/latest)를 참고하세요.
 
 [설치 가이드](docs/USER_INSTALLATION_GUIDE.en.md) · [문제 해결](docs/FAQ.en.md)
 
@@ -238,13 +238,30 @@ LAN IP나 자체 도메인으로 접속하면 `.env`의 `AUTOCLIP_ALLOWED_ORIGIN
 
 **CLI / MCP**
 
-Python 3.10+(3.11 권장), PATH의 FFmpeg와 FFprobe가 필요합니다. Redis는 필요 없습니다. [정식 CLI / MCP ZIP](https://github.com/zhouxiaoka/autoclip/releases/download/v1.5.0/autoclip-1.5.0-cli-mcp.zip)을 풀고 해당 디렉터리에서 실행하세요:
+Python 3.10+(3.11 권장), PATH의 FFmpeg와 FFprobe가 필요합니다. Redis는 필요 없습니다. [정식 CLI / MCP ZIP](https://github.com/zhouxiaoka/autoclip/releases/latest)을 풀고 해당 디렉터리에서 실행하세요:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 python -m pip install -r requirements.txt
-python -m pip install --force-reinstall --no-deps autoclip-1.5.0-py3-none-any.whl
+python -m pip install --force-reinstall --no-deps autoclip_mcp-*-py3-none-any.whl
+```
+
+ZIP 없이 설치할 때는 다음 명령으로 설치할 수 있습니다. 클론한 소스에서 설치하는 방법도 그대로 사용할 수 있습니다:
+
+```bash
+# 一行安装
+uvx autoclip-mcp
+npx skills add zhouxiaoka/autoclip
+```
+
+```bash
+# 备选：在已克隆的仓库根目录从源码安装
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip install --no-deps .
+autoclip --version
 ```
 
 위 명령은 macOS / Linux용입니다. Windows는 `py -m venv venv`로 만들고 `.\venv\Scripts\Activate.ps1`로 활성화한 뒤 같은 `python -m pip` 설치 명령을 실행하세요.
@@ -343,6 +360,7 @@ Docker 안 `localhost`는 컨테이너입니다. 호스트 모델은 컨테이�
 | 자체 운영과 자동화 | [Docker](docs/DOCKER.en.md) · [CLI / MCP](docs/CLI_AND_MCP.md)(중국어) · [Agent skill](skills/autoclip/SKILL.md)(중국어) · [OpenCode](docs/OPENCODE.en.md) |
 | 모델과 장애 | [모델 설정](docs/MULTI_LLM_PROVIDER_GUIDE.md)(중국어) · [FAQ](docs/FAQ.en.md) |
 | 버전·로드맵·개인정보 | [변경 기록](CHANGELOG.md) · [로드맵](ROADMAP.md)(중국어) · [커뮤니티 보드](docs/COMMUNITY_BOARD.md)(중국어) · [개인정보](docs/PRIVACY.en.md) |
+| 연구 | [연구 노트 #1](docs/research/2026-10-what-drives-views/article-en.md) · [中文](docs/research/2026-10-what-drives-views/article-zh.md) |
 | 개발과 번역 | [기여](CONTRIBUTING.md)(중국어) · [번역 관리](docs/i18n.md)(중국어) |
 
 ## 참여

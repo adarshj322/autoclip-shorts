@@ -84,6 +84,8 @@ def timestamp(value):
 
 
 EVIDENCE_CONTRACT = 'impact-inheritance/v1'
+COMPOSED_EVIDENCE_CONTRACT = 'impact-inheritance/v2'
+EVIDENCE_CONTRACTS = (None, EVIDENCE_CONTRACT, COMPOSED_EVIDENCE_CONTRACT)
 
 
 def evidence_ref(folder, value, files):
@@ -117,34 +119,9 @@ def git_bytes(args, *, repo=None):
         raise GateError('source objects unavailable for impact review') from error
 
 
-def row_evidence(row, label, platforms, manifest, folder, built_at, now, files, *, timed=True):
-    """Return effective acceptance time; never replace the original execution time."""
-    require(manifest.get('evidence_contract') in (None, EVIDENCE_CONTRACT), 'unknown evidence contract')
-    require(isinstance(row, dict) and row.get('status') == 'passed', f'{label} not passed')
-    files.add(evidence_file(folder, row.get('evidence')))
-    mode = row.get('evidence_mode', 'execution')
-    require(mode in ('execution', 'inherited'), 'unknown evidence mode')
-    if mode == 'execution':
-        require('reviewed_at' not in row, 'execution must not conceal an inheritance review')
-        if not timed:
-            return None  # Legacy release regression summaries retain their existing contract.
-        at = timestamp(row.get('completed_at'))
-        require(built_at <= at <= now, f'{label} evidence predates build or is in the future')
-        return at
-    require(manifest.get('evidence_contract') == EVIDENCE_CONTRACT, 'inheritance contract required')
-    require(isinstance(platforms, list) and platforms and all(p in PLATFORMS for p in platforms)
-            and len(set(platforms)) == len(platforms), 'inheritance platforms required')
-    review = json.loads(evidence_file(folder, row['evidence']).read_text(encoding='utf-8'))
-    require(isinstance(review, dict) and review.get('contract') == EVIDENCE_CONTRACT, 'impact review required')
-    reviewed = timestamp(row.get('reviewed_at'))
-    require(review.get('reviewed_at') == row['reviewed_at'] and built_at <= reviewed <= now,
-            'impact review must follow current build and not be in the future')
-    require(isinstance(review.get('reviewer'), str) and review['reviewer'].strip(), 'named impact reviewer required')
-    require(isinstance(review.get('reason'), str) and review['reason'].strip(), 'impact scope reasoning required')
-    target = {key: manifest[key] for key in ('commit', 'build_run_id', 'assets')}
-    target.update(platforms=platforms, label=label)
-    require(review.get('target') == target, 'impact review current target mismatch')
-    origin = proof_json(folder, review.get('origin'), files)
+def original_evidence(component, label, platforms, manifest, folder, reviewed, files):
+    """Apply the same provenance, full-diff and dependency checks to each origin."""
+    origin = proof_json(folder, component.get('origin'), files)
     require(origin.get('status') == 'passed', 'original execution did not pass')
     identity('v0.0.0', origin.get('commit'))
     require(type(origin.get('build_run_id')) is int and origin['build_run_id'] > 0, 'original build ID required')
@@ -153,7 +130,6 @@ def row_evidence(row, label, platforms, manifest, folder, built_at, now, files, 
             isinstance(v, str) and re.fullmatch(r'[0-9a-f]{64}', v) for k, v in hashes.items()),
             'original package hashes required')
     require(origin.get('platforms') == platforms and origin.get('label') == label, 'original assertion scope mismatch')
-    require(origin.get('completed_at') == row.get('completed_at'), 'original execution time must be preserved')
     old_time = timestamp(origin.get('completed_at'))
     old_build = proof_json(folder, origin.get('build'), files)
     require(old_build.get('id') == origin['build_run_id'] and old_build.get('head_sha') == origin['commit']
@@ -165,14 +141,14 @@ def row_evidence(row, label, platforms, manifest, folder, built_at, now, files, 
     require(old_packages.get('schema_version') == 1 and all(old_packages.get(k) == origin[k]
             for k in ('commit', 'build_run_id', 'assets')), 'original package provenance mismatch')
     evidence_ref(folder, origin.get('evidence'), files)
-    evidence_ref(folder, review.get('runtime_evidence'), files)
-    diff = proof_json(folder, review.get('diff'), files)
+    evidence_ref(folder, component.get('runtime_evidence'), files)
+    diff = proof_json(folder, component.get('diff'), files)
     require(diff.get('from_commit') == origin['commit'] and diff.get('to_commit') == manifest['commit'],
             'impact diff source mismatch')
     actual_diff = git_bytes(['diff', '--no-ext-diff', '--no-textconv', '--binary',
                              origin['commit'], manifest['commit'], '--'])
     require(diff.get('diff_sha256') == hashlib.sha256(actual_diff).hexdigest(), 'impact diff mismatch')
-    dependencies = review.get('dependencies')
+    dependencies = component.get('dependencies')
     require(isinstance(dependencies, list) and dependencies, 'unchanged assertion dependencies required')
     paths = set()
     for dep in dependencies:
@@ -185,13 +161,96 @@ def row_evidence(row, label, platforms, manifest, folder, built_at, now, files, 
         new = git_bytes(['show', f"{manifest['commit']}:{dep['path']}"])
         require(old == new and dep.get('sha256') == hashlib.sha256(new).hexdigest(),
                 'inherited assertion dependency changed')
+    return origin
+
+
+def composed_originals(row, review, label, platforms, manifest, folder, reviewed, files, affected):
+    require('completed_at' in row and row['completed_at'] is None,
+            'composed row must preserve execution times only in each original record')
+    require(not {'origin', 'diff', 'dependencies', 'runtime_evidence', 'inherited_assertions'} & review.keys(),
+            'composed review cannot contain single-origin fields')
+    components = review.get('inherited_origins')
+    require(isinstance(components, list) and components, 'nonempty original execution list required')
+    inherited, executions = set(), set()
+    for component in components:
+        require(isinstance(component, dict) and set(component) ==
+                {'origin', 'diff', 'dependencies', 'runtime_evidence', 'inherited_assertions'},
+                'composed original fields required')
+        origin = original_evidence(component, label, platforms, manifest, folder, reviewed, files)
+        execution = (origin['commit'], origin['build_run_id'], timestamp(origin['completed_at']),
+                     tuple(sorted(origin['assets'].items())), origin['evidence']['sha256'])
+        require(execution not in executions, 'duplicate original execution')
+        executions.add(execution)
+        ids = assertion_ids(component.get('inherited_assertions'))
+        require(ids <= assertion_ids(origin.get('assertions')), 'original passed assertions missing')
+        require(not ids & affected, 'affected assertions cannot be inherited')
+        require(not ids & inherited, 'duplicate inherited assertion coverage')
+        inherited.update(ids)
+    return inherited
+
+
+def owner_waiver(manifest, built_at, now):
+    """A named owner may ship with unexecuted rows; they stay `waived`, never `passed`."""
+    value = manifest.get('owner_waiver')
+    if value is None:
+        return None
+    require(isinstance(value, dict) and all(isinstance(value.get(k), str) and value[k].strip()
+            for k in ('name', 'reason')), 'owner waiver requires a named owner and reason')
+    require(built_at <= timestamp(value.get('approved_at')) <= now,
+            'owner waiver must follow the build and not be in the future')
+    return value
+
+
+def waived(row, label, manifest, labels):
+    if not (isinstance(row, dict) and row.get('status') == 'waived'):
+        return False
+    require(manifest.get('owner_waiver') is not None, f'{label} waived without a named owner waiver')
+    require(isinstance(row.get('waiver_reason'), str) and row['waiver_reason'].strip(),
+            f'{label} waiver reason required')
+    labels.append(label)
+    return True
+
+
+def row_evidence(row, label, platforms, manifest, folder, built_at, now, files, *, timed=True):
+    """Return effective acceptance time; never replace the original execution time."""
+    require(manifest.get('evidence_contract') in EVIDENCE_CONTRACTS, 'unknown evidence contract')
+    require(isinstance(row, dict) and row.get('status') == 'passed', f'{label} not passed')
+    files.add(evidence_file(folder, row.get('evidence')))
+    mode = row.get('evidence_mode', 'execution')
+    require(mode in ('execution', 'inherited'), 'unknown evidence mode')
+    if mode == 'execution':
+        require('reviewed_at' not in row, 'execution must not conceal an inheritance review')
+        if not timed:
+            return None  # Legacy release regression summaries retain their existing contract.
+        at = timestamp(row.get('completed_at'))
+        require(built_at <= at <= now, f'{label} evidence predates build or is in the future')
+        return at
+    contract = manifest.get('evidence_contract')
+    require(contract in (EVIDENCE_CONTRACT, COMPOSED_EVIDENCE_CONTRACT), 'inheritance contract required')
+    require(isinstance(platforms, list) and platforms and all(p in PLATFORMS for p in platforms)
+            and len(set(platforms)) == len(platforms), 'inheritance platforms required')
+    review = json.loads(evidence_file(folder, row['evidence']).read_text(encoding='utf-8'))
+    require(isinstance(review, dict) and review.get('contract') == contract, 'impact review required')
+    reviewed = timestamp(row.get('reviewed_at'))
+    require(review.get('reviewed_at') == row['reviewed_at'] and built_at <= reviewed <= now,
+            'impact review must follow current build and not be in the future')
+    require(isinstance(review.get('reviewer'), str) and review['reviewer'].strip(), 'named impact reviewer required')
+    require(isinstance(review.get('reason'), str) and review['reason'].strip(), 'impact scope reasoning required')
+    target = {key: manifest[key] for key in ('commit', 'build_run_id', 'assets')}
+    target.update(platforms=platforms, label=label)
+    require(review.get('target') == target, 'impact review current target mismatch')
     required = assertion_ids(review.get('required_assertions'))
-    inherited = assertion_ids(review.get('inherited_assertions'))
-    require(inherited <= assertion_ids(origin.get('assertions')), 'original passed assertions missing')
     affected = review.get('affected_assertions')
     require(isinstance(affected, list), 'affected assertion scope required')
     affected = assertion_ids(affected) if affected else set()
-    require(not inherited & affected, 'affected assertions cannot be inherited')
+    if contract == COMPOSED_EVIDENCE_CONTRACT:
+        inherited = composed_originals(row, review, label, platforms, manifest, folder, reviewed, files, affected)
+    else:
+        origin = original_evidence(review, label, platforms, manifest, folder, reviewed, files)
+        require(origin.get('completed_at') == row.get('completed_at'), 'original execution time must be preserved')
+        inherited = assertion_ids(review.get('inherited_assertions'))
+        require(inherited <= assertion_ids(origin.get('assertions')), 'original passed assertions missing')
+        require(not inherited & affected, 'affected assertions cannot be inherited')
     fresh = review.get('fresh')
     require(isinstance(fresh, list), 'fresh assertion evidence list required')
     covered = set(inherited)
@@ -208,6 +267,45 @@ def row_evidence(row, label, platforms, manifest, folder, built_at, now, files, 
     require(covered == required and affected <= covered - inherited,
             'incomplete required or affected assertion coverage')
     return reviewed
+
+
+def source_commits(manifest, folder):
+    """List only validated full SHAs for fetching objects; this is not acceptance."""
+    require(isinstance(manifest, dict), 'acceptance JSON object required')
+    contract = manifest.get('evidence_contract')
+    require(contract in EVIDENCE_CONTRACTS, 'unknown evidence contract')
+    identity('v0.0.0', manifest.get('commit'))
+    commits = {manifest['commit']}
+    rows = []
+    for platform in PLATFORMS:
+        checks = manifest.get('platforms', {}).get(platform, {}).get('checks', {})
+        require(isinstance(checks, dict), 'platform checks required')
+        rows.extend(checks.get(case, {}) for case in CASES)
+    regressions = manifest.get('regressions', [])
+    require(isinstance(regressions, list), 'regression list required')
+    rows.extend(regressions)
+    for row in rows:
+        require(isinstance(row, dict), 'acceptance row required')
+        mode = row.get('evidence_mode', 'execution')
+        require(mode in ('execution', 'inherited'), 'unknown evidence mode')
+        if mode != 'inherited':
+            continue
+        require(row.get('status') == 'passed', 'inherited row not passed')
+        review = json.loads(evidence_file(folder, row.get('evidence')).read_text(encoding='utf-8'))
+        require(isinstance(review, dict) and contract in (EVIDENCE_CONTRACT, COMPOSED_EVIDENCE_CONTRACT)
+                and review.get('contract') == contract, 'impact review required')
+        if contract == EVIDENCE_CONTRACT:
+            components = [review]
+        else:
+            components = review.get('inherited_origins')
+            require(isinstance(components, list) and components, 'nonempty original execution list required')
+        for component in components:
+            require(isinstance(component, dict), 'original component required')
+            origin = proof_json(folder, component.get('origin'), set())
+            require(origin.get('status') == 'passed', 'original execution did not pass')
+            identity('v0.0.0', origin.get('commit'))
+            commits.add(origin['commit'])
+    return sorted(commits)
 
 
 def validate_assets(manifest, assets, tag, repository):
@@ -263,7 +361,7 @@ def template(tag, commit, assets, release_type, build_run_id):
 def validate(manifest, folder, assets, tag, commit, repository, build, jobs, now=None):
     identity(tag, commit)
     require(manifest.get('schema_version') == 1, 'unsupported acceptance schema')
-    require(manifest.get('evidence_contract') in (None, EVIDENCE_CONTRACT), 'unknown evidence contract')
+    require(manifest.get('evidence_contract') in EVIDENCE_CONTRACTS, 'unknown evidence contract')
     require(manifest.get('tag') == tag and manifest.get('commit') == commit, 'acceptance tag/commit mismatch')
     require(manifest.get('release_type') in ('hotfix', 'routine'), 'release_type required')
     require(manifest.get('blockers') == [], 'unresolved blockers prohibit promotion')
@@ -271,8 +369,10 @@ def validate(manifest, folder, assets, tag, commit, repository, build, jobs, now
     validate_build(manifest, build, jobs, commit)
     now = now or dt.datetime.now(dt.timezone.utc)
     built_at = timestamp(build.get('updated_at'))
+    waiver = owner_waiver(manifest, built_at, now)
     evidence = set()
     completed = []
+    skipped = []
 
     def passed(row, label):
         require(isinstance(row, dict) and row.get('status') == 'passed', f'{label} not passed')
@@ -284,12 +384,15 @@ def validate(manifest, folder, assets, tag, commit, repository, build, jobs, now
             require(isinstance(row.get(field), str) and row[field].strip(), f'{platform} missing {field}')
         for case in CASES:
             check = row.get('checks', {}).get(case, {})
-            completed.append(row_evidence(check, f'{platform}/{case}', [platform], manifest,
-                                          folder, built_at, now, evidence))
+            if not waived(check, f'{platform}/{case}', manifest, skipped):
+                completed.append(row_evidence(check, f'{platform}/{case}', [platform], manifest,
+                                              folder, built_at, now, evidence))
     regressions = manifest.get('regressions')
     require(isinstance(regressions, list) and regressions, 'explicit regression acceptance required')
     for row in regressions:
         require(isinstance(row.get('id'), str) and row['id'].strip(), 'regression id required')
+        if waived(row, 'regression ' + row['id'], manifest, skipped):
+            continue
         at = row_evidence(row, 'regression ' + row['id'], row.get('platforms'), manifest,
                           folder, built_at, now, evidence, timed=False)
         if at is not None:
@@ -297,15 +400,18 @@ def validate(manifest, folder, assets, tag, commit, repository, build, jobs, now
     observation = manifest.get('observation', {})
     require(observation.get('evidence_mode', 'execution') == 'execution' and 'reviewed_at' not in observation,
             'current observation cannot be inherited')
-    passed(observation, 'observation')
-    start, end = timestamp(observation.get('started_at')), timestamp(observation.get('ended_at'))
-    hours = 4 if manifest['release_type'] == 'hotfix' else 24
-    require(built_at <= start <= end <= now and end - start >= dt.timedelta(hours=hours), f'observation must cover {hours} hours after build')
-    require(max(completed) <= end, 'acceptance finished after observation')
-    for platform in PLATFORMS:
-        for field in ('devices', 'completed_flows'):
-            number = observation.get(field, {}).get(platform)
-            require(type(number) is int and number > 0, f'no observed {field} for {platform}; silence is not evidence')
+    if waived(observation, 'observation', manifest, skipped):
+        end = timestamp(waiver['approved_at'])
+    else:
+        passed(observation, 'observation')
+        start, end = timestamp(observation.get('started_at')), timestamp(observation.get('ended_at'))
+        hours = 4 if manifest['release_type'] == 'hotfix' else 24
+        require(built_at <= start <= end <= now and end - start >= dt.timedelta(hours=hours), f'observation must cover {hours} hours after build')
+        for platform in PLATFORMS:
+            for field in ('devices', 'completed_flows'):
+                number = observation.get(field, {}).get(platform)
+                require(type(number) is int and number > 0, f'no observed {field} for {platform}; silence is not evidence')
+    require(not completed or max(completed) <= end, 'acceptance finished after observation')
     approval = manifest.get('approval', {})
     require(isinstance(approval.get('name'), str) and approval['name'].strip(), 'named reviewer required')
     require(end <= timestamp(approval.get('approved_at')) <= now, 'approval must follow observation')
@@ -318,6 +424,8 @@ def main():
     init = commands.add_parser('init')
     check = commands.add_parser('validate')
     stamp = commands.add_parser('provenance')
+    sources = commands.add_parser('source-commits')
+    sources.add_argument('--manifest', type=Path, required=True)
     for command in (init, check, stamp):
         command.add_argument('--tag', required=True)
         command.add_argument('--commit', required=True)
@@ -333,6 +441,10 @@ def main():
     check.add_argument('--bundle', type=Path)
     args = parser.parse_args()
     try:
+        if args.command == 'source-commits':
+            value = json.loads(args.manifest.read_text(encoding='utf-8'))
+            print('\n'.join(source_commits(value, args.manifest.parent)))
+            return 0
         if args.command == 'provenance':
             value = provenance(args.tag, args.commit, args.assets, args.build_run_id)
             (args.assets / 'build-provenance.json').write_text(json.dumps(value, indent=2) + '\n', encoding='utf-8')

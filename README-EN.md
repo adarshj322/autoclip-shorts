@@ -19,13 +19,13 @@ The app is free; cloud models charge by usage. Open the editor whenever you want
 
 <a href="https://trendshift.io/repositories/25801"><img src="https://trendshift.io/api/badge/repositories/25801" alt="AutoClip — GitHub Trending" width="250" height="55"></a>
 
-**[Download desktop](https://github.com/zhouxiaoka/autoclip/releases/latest)** · [Case library](https://zhouxiaoka.github.io/autoclip_intro/cases/) · [Quick start](#quick-start) · [Docs](#documentation) · [Report an issue](https://github.com/zhouxiaoka/autoclip/issues/new/choose)
+**[Website](https://zhouxiaoka.github.io/autoclip_intro/)** · **[Download desktop](https://github.com/zhouxiaoka/autoclip/releases/latest)** · [Case library](https://zhouxiaoka.github.io/autoclip_intro/cases/) · [Research](docs/research/2026-10-what-drives-views/article-en.md) · [Quick start](#quick-start) · [Docs](#documentation) · [Report an issue](https://github.com/zhouxiaoka/autoclip/issues/new/choose)
 
 [简体中文](README.md) · **English** · [日本語](README-JA.md) · [한국어](README-KO.md) · [Español](README-ES.md) · [Português](README-PT.md) · [Русский](README-RU.md) · [Français](README-FR.md)
 
 </div>
 
-**[1.5.0 is officially released](https://github.com/zhouxiaoka/autoclip/releases/tag/v1.5.0)**, with desktop, CLI, and MCP updated together. See the [changelog](CHANGELOG.md) for quick output, caption pagination, speaker framing, and long-video queue fixes. Please upgrade older installations.
+**[The latest release](https://github.com/zhouxiaoka/autoclip/releases/latest)** is what `autoclip --version` reports, with desktop, CLI, and MCP updated together. See the [changelog](CHANGELOG.md) for quick output, caption pagination, speaker framing, and long-video queue fixes. Please upgrade older installations.
 
 ## Real clips
 
@@ -213,7 +213,7 @@ Cutting and rendering run on your computer. Cloud analysis sends relevant captio
 3. **Paste a link, pick a platform.** Start with a captioned interview or podcast and choose a vertical layout. Without captions, prepare Whisper / SenseVoice in Settings or configure cloud transcription.
 4. **Review and download.** Check captions, framing, and content completeness, then save the publish kit or connect an account to publish. Generate on-demand alternatives when you need more clips.
 
-Intel Macs / Linux can use Docker or CLI. See the [installation guide](docs/USER_INSTALLATION_GUIDE.en.md) and [1.5.0 Release](https://github.com/zhouxiaoka/autoclip/releases/tag/v1.5.0) for requirements, first-launch guidance, and acceptance scope.
+Intel Macs / Linux can use Docker or CLI. See the [installation guide](docs/USER_INSTALLATION_GUIDE.en.md) and [latest Release](https://github.com/zhouxiaoka/autoclip/releases/latest) for requirements, first-launch guidance, and acceptance scope.
 
 [Full installation guide](docs/USER_INSTALLATION_GUIDE.en.md) · [Troubleshooting](docs/FAQ.en.md)
 
@@ -240,13 +240,30 @@ For a LAN IP or custom domain, add the frontend address to `AUTOCLIP_ALLOWED_ORI
 
 **CLI / MCP**
 
-Requires Python 3.10+ (3.11 recommended), with FFmpeg and FFprobe on PATH; local CLI needs no Redis. Download the [official CLI / MCP ZIP](https://github.com/zhouxiaoka/autoclip/releases/download/v1.5.0/autoclip-1.5.0-cli-mcp.zip), extract it, and run in that directory:
+Requires Python 3.10+ (3.11 recommended), with FFmpeg and FFprobe on PATH; local CLI needs no Redis. Download the [official CLI / MCP ZIP](https://github.com/zhouxiaoka/autoclip/releases/latest), extract it, and run in that directory:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 python -m pip install -r requirements.txt
-python -m pip install --force-reinstall --no-deps autoclip-1.5.0-py3-none-any.whl
+python -m pip install --force-reinstall --no-deps autoclip_mcp-*-py3-none-any.whl
+```
+
+Without the ZIP, install with one command. Installing from a cloned source checkout remains available:
+
+```bash
+# 一行安装
+uvx autoclip-mcp
+npx skills add zhouxiaoka/autoclip
+```
+
+```bash
+# 备选：在已克隆的仓库根目录从源码安装
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip install --no-deps .
+autoclip --version
 ```
 
 Commands above are for macOS / Linux. On Windows, create with `py -m venv venv` and activate with `.\venv\Scripts\Activate.ps1`, then use the same `python -m pip` installation commands.
@@ -331,7 +348,7 @@ Interviews, podcasts, courses, and talking-head footage are the main validated u
 <details>
 <summary>Why were no clips generated?</summary>
 
-Check the failed stage: captions/transcription, model connection, FFmpeg, disk space, and platform eligibility. YouTube long-form requires complete clips of at least 180 seconds; use Shorts or Bilibili for shorter footage. If it still fails, include your 1.5.0 version, OS, source duration, model, and sanitized logs in [known issues](https://github.com/zhouxiaoka/autoclip/issues/96).
+Check the failed stage: captions/transcription, model connection, FFmpeg, disk space, and platform eligibility. YouTube long-form requires complete clips of at least 180 seconds; use Shorts or Bilibili for shorter footage. If it still fails, include the version from `autoclip --version`, OS, source duration, model, and sanitized logs in [known issues](https://github.com/zhouxiaoka/autoclip/issues/96).
 
 </details>
 
@@ -347,6 +364,7 @@ Check the failed stage: captions/transcription, model connection, FFmpeg, disk s
 | Self-host and automation | [Docker](docs/DOCKER.en.md) · [CLI / MCP](docs/CLI_AND_MCP.md) (Chinese) · [Agent skill](skills/autoclip/SKILL.md) (Chinese) · [OpenCode](docs/OPENCODE.en.md) |
 | Models and troubleshooting | [Model setup](docs/MULTI_LLM_PROVIDER_GUIDE.md) (Chinese) · [FAQ](docs/FAQ.en.md) |
 | Versions, roadmap, privacy | [Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) (Chinese) · [Community board](docs/COMMUNITY_BOARD.md) (Chinese) · [Privacy](docs/PRIVACY.en.md) |
+| Research | [Research note #1: Pick the moment, not the effect](docs/research/2026-10-what-drives-views/article-en.md) · [中文](docs/research/2026-10-what-drives-views/article-zh.md) |
 | Contribute and translate | [Contributing](CONTRIBUTING.md) (Chinese) · [Translation maintenance](docs/i18n.md) (Chinese) |
 
 ## Contribute

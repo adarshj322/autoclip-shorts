@@ -10,6 +10,7 @@
  * 因此 dev 环境（无 key）不会污染线上数据。
  */
 import posthog from 'posthog-js'
+import { apiConfigManager } from '../utils/apiConfig'
 import { routeName, type Properties } from './workflow'
 
 export const POSTHOG_KEY = import.meta.env.VITE_PUBLIC_POSTHOG_KEY as string | undefined
@@ -21,11 +22,142 @@ export const POSTHOG_HOST =
 const OPT_OUT_STORAGE_KEY = 'autoclip.analytics.optOut'
 
 let initialized = false
+let flagsNetworkEnabled = false
 let preferenceOverride: boolean | undefined
+let publishedDistinctId = ''
+let pendingDistinctId = ''
+let retryIdentity = false
+let watchingIdentity = false
+const ANONYMOUS_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{7,199}$/
+
+/** Persist the SDK's anonymous id so backend events join the same person and experiment. */
+function publishAnonymousId(): void {
+  if (!initialized || !isAnalyticsEnabled() || typeof fetch !== 'function') return
+  let id = ''
+  try { id = String(posthog.get_distinct_id?.() || '') } catch { return }
+  if (!ANONYMOUS_ID.test(id) || id === publishedDistinctId) return
+  // The desktop API port often arrives while the first attempt is still in flight.
+  if (id === pendingDistinctId) {
+    retryIdentity = true
+    return
+  }
+  pendingDistinctId = id
+  retryIdentity = false
+  const finish = (ok: boolean) => {
+    if (pendingDistinctId === id) pendingDistinctId = ''
+    if (ok) publishedDistinctId = id
+    else if (retryIdentity) {
+      retryIdentity = false
+      publishAnonymousId()
+    }
+  }
+  try {
+    const base = String(apiConfigManager.getBaseUrl() || '/api/v1').replace(/\/$/, '')
+    void fetch(`${base}/settings/analytics-identity`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ distinct_id: id }),
+    }).then((response) => finish(Boolean(response?.ok))).catch(() => finish(false))
+  } catch {
+    finish(false)
+  }
+}
+
+function watchAnonymousId(): void {
+  if (watchingIdentity) return
+  watchingIdentity = true
+  try { apiConfigManager.addListener(() => publishAnonymousId()) } catch { /* backend port can arrive later */ }
+}
+
 const preferenceListeners = new Set<() => void>()
+const remoteFlagListeners = new Set<() => void>()
 export function onAnalyticsPreferenceChange(listener: () => void): () => void {
   preferenceListeners.add(listener)
   return () => { preferenceListeners.delete(listener) }
+}
+export function subscribeRemoteFlags(listener: () => void): () => void {
+  remoteFlagListeners.add(listener)
+  return () => { remoteFlagListeners.delete(listener) }
+}
+// W157-N3: posthog-js restores the previous session's flags from its own persistence
+// before the network answers. After an upgrade those are the old version's values
+// (e.g. pkg_templates_v1=false from the 1.5.6 cohort), so ignore them until this
+// session's flag response arrives.
+let remoteFlagsFresh = false
+export function markRemoteFlagsResponse(errorsLoading?: boolean): void {
+  if (!errorsLoading) remoteFlagsFresh = true
+  notifyRemoteFlags()
+}
+/** Test seam. */
+export function resetRemoteFlagsFresh(): void {
+  remoteFlagsFresh = false
+}
+function notifyRemoteFlags() {
+  for (const listener of remoteFlagListeners) {
+    try { listener() } catch { /* flag subscribers cannot break analytics */ }
+  }
+}
+
+/**
+ * Already-loaded flag value. Never calls the network.
+ * Returns undefined unless analytics is on and flag requests were enabled at init.
+ */
+export function readLoadedFlag(name: string): unknown {
+  if (!initialized || !flagsNetworkEnabled || !isAnalyticsEnabled() || !remoteFlagsFresh) return undefined
+  try {
+    const variants = posthog.featureFlags?.getFlagVariants?.()
+    if (!variants || typeof variants !== 'object' || !Object.prototype.hasOwnProperty.call(variants, name)) return undefined
+    const value = variants[name]
+    return typeof value === 'boolean' || typeof value === 'string' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Properties PostHog evaluates flags against. `app_version` is the desktop
+ * version as plain MAJOR.MINOR.PATCH (e.g. "1.5.7") so release conditions can
+ * use the semver operators (`app_version` >= 1.5.7). Sent as flag-only person
+ * properties (no person profile is created; person_profiles stays
+ * identified_only) and registered as a super property for events.
+ */
+export function flagPersonProperties(): { app_version: string } {
+  const raw = String(import.meta.env.VITE_APP_VERSION || '').trim().replace(/^v/i, '')
+  return { app_version: raw || 'unknown' }
+}
+
+type FlagPropsTarget = {
+  register?: (props: Properties) => void
+  setPersonPropertiesForFlags?: (props: Properties, reload?: boolean) => void
+}
+
+function applyFlagProperties(target: FlagPropsTarget) {
+  try {
+    const props = flagPersonProperties()
+    target.register?.(props)
+    // reload=false: callers either run before the first flag request (loaded) or reload right after.
+    target.setPersonPropertiesForFlags?.(props, false)
+  } catch { /* analytics cannot break the app */ }
+}
+
+function enableFlagNetwork() {
+  flagsNetworkEnabled = true
+  applyFlagProperties(posthog)
+  try {
+    posthog.set_config?.({ advanced_disable_flags: false })
+    posthog.featureFlags?.setReloadingPaused?.(false)
+    posthog.reloadFeatureFlags?.()
+  } catch { /* analytics cannot break settings */ }
+  notifyRemoteFlags()
+}
+
+function disableFlagNetwork() {
+  flagsNetworkEnabled = false
+  try {
+    posthog.set_config?.({ advanced_disable_flags: true })
+    posthog.featureFlags?.setReloadingPaused?.(true)
+  } catch { /* analytics cannot break settings */ }
+  notifyRemoteFlags()
 }
 
 /** Never let analytics failures change a successful product operation. */
@@ -82,8 +214,9 @@ export function initAnalytics(): void {
     capture_performance: false,
     // 隐私优先：默认不录屏（PostHog 端也需另行开启）
     disable_session_recording: true,
-    // Feature flags and remote configuration are unused; opt-out must stop all SDK requests.
-    advanced_disable_flags: true,
+    // Flag requests exist only while analytics is on. Opt-out never initializes the SDK,
+    // and turning analytics off pauses any reload that was already started.
+    advanced_disable_flags: false,
     // HashRouter 下手动上报 pageview（见 trackPageview）
     capture_pageview: false,
     capture_pageleave: false,
@@ -91,10 +224,17 @@ export function initAnalytics(): void {
     // 尊重用户在本机的关闭偏好
     opt_out_capturing_by_default: !isAnalyticsEnabled(),
     loaded: (ph) => {
+      // Runs before posthog-js issues its first flag request, so that request already carries app_version.
+      applyFlagProperties(ph)
+      try { ph.onFeatureFlags?.((_flags: unknown, _variants: unknown, context?: { errorsLoading?: boolean }) => markRemoteFlagsResponse(context?.errorsLoading)) } catch { /* flags are optional */ }
+      publishAnonymousId()
       if (import.meta.env.DEV) ph.debug()
     },
     })
+    flagsNetworkEnabled = true
     initialized = true
+    publishAnonymousId()
+    watchAnonymousId()
   } catch {
     initialized = false
   }
@@ -114,8 +254,14 @@ export function setAnalyticsEnabled(enabled: boolean): void {
   if (!initialized && enabled) initAnalytics()
   if (!initialized) return
   try {
-    if (enabled) posthog.opt_in_capturing()
-    else posthog.opt_out_capturing()
+    if (enabled) {
+      posthog.opt_in_capturing()
+      publishAnonymousId()
+      if (!flagsNetworkEnabled) enableFlagNetwork()
+    } else {
+      posthog.opt_out_capturing()
+      disableFlagNetwork()
+    }
   } catch { /* analytics cannot break settings */ }
 }
 

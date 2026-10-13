@@ -69,7 +69,7 @@ def test_step1_all_chunks_failing_surfaces_llm_error(tmp_path, prompt_files, mon
 
     assert exc.value.stage == "ANALYZE"
     assert "1/1" in exc.value.message
-    assert "未配置LLM提供商" in exc.value.message
+    assert "未配置LLM提供商" not in exc.value.message  # provider/raw text is logged, never shown (RC156 c5)
     assert exc.value.code == "llm_not_configured"
     assert "自备" in exc.value.hint
     assert "设置 → 模型" in exc.value.hint
@@ -495,3 +495,64 @@ def test_processing_task_reads_error_field_from_adapter_result():
     """tasks/processing.py 以前只读 message，adapter 返回的是 error → 用户永远只看到「处理失败」"""
     src = (Path(__file__).resolve().parents[1] / "tasks" / "processing.py").read_text(encoding="utf-8")
     assert 'result.get("error") or result.get("message")' in src
+
+
+class _ProviderStatusError(Exception):
+    """Mimics openai.InternalServerError (status_code=500) raised by the LLM client."""
+
+    def __init__(self, status_code):
+        super().__init__(f"Error code: {status_code} - private provider body")
+        self.status_code = status_code
+
+
+def test_step1_provider_500_reaches_failure_context_http_status(tmp_path, prompt_files, monkeypatch):
+    # RC156 Win QA #1: analysis 500 recorded failure_stage=analyze but http_status=null.
+    from backend.core.sentry_setup import studio_error_code, studio_failure_context
+
+    srt = tmp_path / "in.srt"
+    srt.write_text(SRT, encoding="utf-8")
+    extractor = _extractor(tmp_path, prompt_files, monkeypatch, [_ProviderStatusError(500)] * 8)
+
+    with pytest.raises(PipelineFailure) as exc:
+        extractor.extract_outline(srt)
+
+    assert exc.value.stage == "ANALYZE"
+    assert studio_error_code(exc.value) == "provider_error"
+    assert studio_failure_context(exc.value, "production") == {"failure_stage": "analyze", "http_status": 500}
+
+
+def test_timeline_call_failure_report_carries_http_status():
+    # The timeline stage aggregates chunk reports and has no exception chain to walk.
+    from backend.core.sentry_setup import studio_failure_context
+    from backend.pipeline.failures import timeline_failure_from_report
+
+    report = {"parsed": 0, "chunks": [
+        {"outcome": "call_failed", "error_code": "provider_error", "http_status": 503},
+    ]}
+    failure = timeline_failure_from_report(2, report)
+    assert failure.code == "provider_error"
+    assert studio_failure_context(failure, "production") == {"failure_stage": "analyze", "http_status": 503}
+
+    no_status = timeline_failure_from_report(2, {"parsed": 0, "chunks": [
+        {"outcome": "call_failed", "error_code": "connection"},
+    ]})
+    assert studio_failure_context(no_status, "production") == {"failure_stage": "analyze"}
+
+
+@pytest.mark.parametrize('error, code', [
+    (ConnectionError('Connection error.'), 'connection'),
+    (TimeoutError('Request timed out.'), 'timeout'),
+    (type('RateLimitError', (Exception,), {'status_code': 429})('Error code: 429 - rate limit'), 'rate_limited'),
+])
+def test_offline_failure_shows_one_fixed_translatable_sentence(tmp_path, prompt_files, monkeypatch, caplog, error, code):
+    """RC156 Win QA c5: 「无法连接模型服务…」 used to end with the provider's English 「Connection error.」."""
+    from backend.pipeline.failures import MODEL_CALL_MESSAGES
+    srt = tmp_path / 'input.srt'
+    srt.write_text(SRT, encoding='utf-8')
+    extractor = _extractor(tmp_path, prompt_files, monkeypatch, [error])
+    with pytest.raises(PipelineFailure) as caught:
+        extractor.extract_outline(srt)
+    assert caught.value.code == code
+    assert caught.value.user_message() == MODEL_CALL_MESSAGES[code]
+    assert str(error) not in caught.value.user_message()
+    assert str(error) in caplog.text  # detail kept in the log
