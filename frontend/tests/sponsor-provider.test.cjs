@@ -8,7 +8,7 @@ function load(file, mocks) {
   const code = ts.transpileModule(fs.readFileSync(path.join(dir, file), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText
-  vm.runInNewContext(code, { exports, require: id => {
+  vm.runInNewContext(code, { exports, URL, require: id => {
     if (id in mocks) return mocks[id]
     if (id === 'react/jsx-runtime') return require(id)
     throw Error(id)
@@ -31,6 +31,7 @@ test('sponsor selection, offer, registration link and attribution follow the cho
     '../../utils/externalLinks': { openExternalLink: url => links.push(url) },
     '../../analytics/events': { trackSponsorLinkOpened: event => events.push(plain(event)) },
     './providers': providers, './modelSettingsLogic': { presetKey: c => c.provider },
+    './providerUrl': load('providerUrl.ts', {}),
   }).default
   const options = providers.providerPickerOptions()
   assert.deepEqual(Array.from(options[0].options, p => p.value), ['api88', 'infistar'])
@@ -51,4 +52,5 @@ test('sponsor selection, offer, registration link and attribution follow the cho
     }
   }
   assert.equal(providers.PROVIDERS.api88.sponsor.registerUrl, 'https://88api.ai/sign-up?aff=2PIc')
+  assert.equal(providers.PROVIDERS.api88.cloud.baseUrl, 'https://api.88api.ai/v1')
 })

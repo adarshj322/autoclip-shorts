@@ -7,9 +7,25 @@
 
 ## [未发布]
 
+- 88API 服务商预设接口地址改为 `https://api.88api.ai/v1`（与 provider-e2e 回归一致）。已保存的 `https://88api.ai/v1` 不改写，仍可继续使用。（1.5.7）
+
+- 内容分析只对 `invalid_response` / `timeline_empty` 自动重试，每种最多再试 2 次（不含首次）；401/429/5xx/超时等由 `classify_upstream_error` 分类后不重试。不含 429 退避或付费前 ASR 预检。（1.5.7 #8）
+- 设置页接口地址保存和输入时规范化：去掉空白和尾部 `/`，缺 scheme 时按本机/公网补 `http`/`https`，OpenAI 兼容地址自动补或去重 `/v1`（百炼专属主机、Gemini 官方路径、fal.run 按各自约定）。只改写，不拦截保存。
+
+- 启动时检查更新：复用现有 GitHub Release / Tauri updater（`latest.json`）。发现新版本时弹出提醒，确认后再下载；同一版本一天最多提醒一次；设置页和提醒弹层可关闭提醒，关闭后仍可手动检查。检查请求不带用户标识；网络失败、限流或离线时静默，不阻塞启动。
+
+- 新增上游错误分类与成功率埋点字段契约（`upstream_errors` / `llm_telemetry`，前端 `successRateContract`）：按 OpenAI、new-api、Gemini、DeepSeek 等响应区分密钥、余额、权限/分组、模型不存在、地址错误、限流、5xx、超时/断连、截断；只提供分类与脱敏，不改现有调用链或上报。八语补齐对应提示 key。
+- 出片成功率埋点（只上报，不改界面）：每次模型 `call` / `vision_call` 上报 `llm_request_finished`；生成/出片终态带 run 级字段，失败时有 `error_code` 和 `failure_stage`；导入探针与提交上报 `asr_readiness_checked`；为设置页校验预留 `provider_validation_finished`。Sentry `user.id` 与 PostHog 匿名 `distinct_id` 对齐。未登记事件或缺必填字段由 `event_catalog.json` 校验测试拦住。不上报 key、提示词、字幕或完整 URL。不删除旧事件。`feedback_submitted` 仍带用户主动填写的 `text` / `contact`；反馈弹窗补充告知：内容和联系方式会发送给开发者，用于回复和创建 GitHub Issue。
+
+- 设置页 API Key 保存和输入去掉首尾空格（含换行），避免粘贴时带上空格导致 401。
+
 - 发布 autoclip-mcp 时推送标签 `mcp-v<version>`。该标签走 pypi environment，只允许从 `mcp-v*` 部署。
 
 ## [1.5.7] - 2026-10-10
+
+- Whisper 模型下载完成后，导入前检查立刻显示转写就绪：下载线程已校验完整快照时直接采用这个结果，不再等磁盘重扫。Windows 验收里看到的「下载完仍提示缺模型」主要是验收脚本在下载前就读了检查结果（仓库脚本已改为下载后再读）；检查与下载用的是同一缓存目录（含 hf-mirror 回退）。（1.5.7 Windows 验收）
+
+- Windows 验收脚本判断更新清单时只看清单本身：版本号格式、目标平台、下载地址和签名是否齐全，线上 latest.json 仍是旧版本也算可读；虚拟机连不上 github.com 记为环境受阻，不再报 `updater_manifest_readable=false`。线上 latest.json 未改动。（1.5.7 Windows 验收）
 
 - 分析偏好写入画面识别（`analysis_mode=visual`）后能读回来：`PUT /studio/analysis-preferences` 会同步改 `ai-model-settings.json` 里的同名字段。此前该接口只写 `analysis-preferences.json`，而读取优先用模型设置文件，所以返回 200 后立刻再读仍是 `auto`，静音素材指定高光会被当成未开画面识别而在导入阶段拒绝（1.5.7 Mac 验收，画面识别阻塞）。
 
