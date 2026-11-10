@@ -18,9 +18,9 @@ import time
 from pathlib import Path
 
 from scripts.auto_shorts._util import run as _default_runner
+from scripts.auto_shorts._util import yt_proxy_args as _yt_proxy_args
 
 FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-ANDROID_EXTRACTOR_ARGS = "youtube:player_client=android"
 _BACKOFF_SECS = (1.0, 2.0, 4.0)
 
 
@@ -40,6 +40,7 @@ def build_ytdlp_cmd(
 ) -> list[str]:
     cmd = [
         "yt-dlp",
+        *_yt_proxy_args(),
         # tv client rides out YouTube's datacenter-IP bot wall (probed 2026-11-10)
         "--extractor-args",
         "youtube:player_client=tv",
@@ -110,7 +111,9 @@ def download_video(url: str, work_dir: Path, runner=None,
     # caller pinned a client via AUTOCLIP_YT_CLIENT (then skip directly).
     if os.environ.get("AUTOCLIP_YT_CLIENT"):
         raise DownloadSkipped(f"429/bot-check for {url} (custom YT client set, skipping)")
-    last = run(cmd + ["--extractor-args", ANDROID_EXTRACTOR_ARGS])
+    fb = list(cmd)
+    fb[fb.index("youtube:player_client=tv")] = "youtube:player_client=android"
+    last = run(fb)
     if last.returncode == 0:
         return _find_outputs(Path(work_dir))
     if _is_rate_limited(last):

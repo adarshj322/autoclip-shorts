@@ -48,13 +48,14 @@ python -m scripts.auto_shorts.run --dry-run   # trial run, publishes nothing
 python -m scripts.auto_shorts.run             # real run, private upload
 ```
 
-Scheduled run (daily 09:00, `flock` prevents overlap):
+Scheduled run (daily 00:15 UTC, just after the OpenRouter free-tier quota
+reset; `flock` prevents overlap):
 
 ```cron
-0 9 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd /path/to/autoclip-shorts && source .env.auto_shorts && venv/bin/python -m scripts.auto_shorts.run' >> logs/auto_shorts.log 2>&1
+15 0 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd /path/to/autoclip-shorts && source .env.auto_shorts && venv/bin/python -m scripts.auto_shorts.run' >> logs/auto_shorts.log 2>&1
 ```
 
-Notes: uploads default to **private** (`privacyStatus=private`) — going public is a manual step; rendered titles credit the source video. Setup details and caveats: [`scripts/auto_shorts/README.md`](scripts/auto_shorts/README.md).
+Notes: uploads default to **private** (`privacyStatus=private`) — going public is a manual step; rendered titles credit the source video. On datacenter VPS IPs YouTube often bot-walls yt-dlp — set `AUTO_SH_YT_PROXY` (residential proxy URL) in `.env.auto_shorts` and export cookies to `.cookies.txt` (`AUTO_SH_COOKIES_FILE`). Setup details and caveats: [`scripts/auto_shorts/README.md`](scripts/auto_shorts/README.md).
 
 ## Real clips
 

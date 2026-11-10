@@ -18,6 +18,7 @@ from pathlib import Path
 from scripts.auto_shorts._util import SENT_END_RE as _SENT_END_RE
 from scripts.auto_shorts._util import run as _default_runner
 from scripts.auto_shorts._util import to_float as _to_float
+from scripts.auto_shorts._util import yt_proxy_args as _yt_proxy_args
 
 QUALIFYING_SCORE = 70
 MIN_CLIPS = 2
@@ -48,6 +49,7 @@ def fetch_subtitles(
     work.mkdir(parents=True, exist_ok=True)
     cmd = [
         "yt-dlp",
+        *_yt_proxy_args(),
         # tv client rides out YouTube's datacenter-IP bot wall (probed 2026-11-10)
         "--extractor-args",
         "youtube:player_client=tv",

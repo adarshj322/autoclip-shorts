@@ -3,6 +3,15 @@ def test_cmd_shape_and_429_skip(tmp_path):
     cmd = build_ytdlp_cmd("https://youtube.com/watch?v=x", tmp_path)
     assert "--write-sub" in cmd and "zh-Hans,zh,en" in " ".join(cmd)
     assert "youtube:player_client=tv" in " ".join(cmd)
+
+
+def test_proxy_env_injected(monkeypatch, tmp_path):
+    from scripts.auto_shorts.download import build_ytdlp_cmd
+    monkeypatch.setenv("AUTO_SH_YT_PROXY", "socks5://u:p@h:1080")
+    cmd = build_ytdlp_cmd("https://youtube.com/watch?v=x", tmp_path)
+    assert cmd[cmd.index("--proxy") + 1] == "socks5://u:p@h:1080"
+    monkeypatch.delenv("AUTO_SH_YT_PROXY")
+    assert "--proxy" not in build_ytdlp_cmd("https://youtube.com/watch?v=x", tmp_path)
     def fail429(*a, **k):
         class R: returncode = 1; stderr = "HTTP Error 429"; stdout = ""
         return R()

@@ -112,14 +112,14 @@ fi
 # ------------------------------------------------------------------ 6. cron
 # NOTE: cron starts with a minimal PATH, so the wrapper exports venv/bin
 # AND the deno bin dir explicitly (interactive shell configs are never read).
-cron_line="0 9 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd $INSTALL_DIR && set -a && source .env.auto_shorts && set +a && export PATH=\"$INSTALL_DIR/venv/bin:\$HOME/.deno/bin:\$PATH\" && venv/bin/python -m scripts.auto_shorts.run' >> $INSTALL_DIR/logs/auto_shorts.log 2>&1 $CRON_MARK"
+cron_line="15 0 * * * flock -n /tmp/auto_shorts.lock bash -c 'cd $INSTALL_DIR && set -a && source .env.auto_shorts && set +a && export PATH=\"$INSTALL_DIR/venv/bin:\$HOME/.deno/bin:\$PATH\" && venv/bin/python -m scripts.auto_shorts.run' >> $INSTALL_DIR/logs/auto_shorts.log 2>&1 $CRON_MARK"
 mkdir -p "$INSTALL_DIR/logs"
 tmp_cron="$(mktemp)"
 trap 'rm -f "$tmp_cron"' EXIT
 crontab -l 2>/dev/null | grep -v "$CRON_MARK" > "$tmp_cron" || true
 echo "$cron_line" >> "$tmp_cron"
 crontab "$tmp_cron"
-log "cron installed (daily 09:00). current auto-shorts lines:"
+log "cron installed (daily 00:15 UTC). current auto-shorts lines:"
 crontab -l | grep "$CRON_MARK" || true
 
 log "done. Uploads go out PRIVATE; flip to public in YouTube Studio."
