@@ -2,6 +2,7 @@ def test_cmd_shape_and_429_skip(tmp_path):
     from scripts.auto_shorts.download import build_ytdlp_cmd, download_video, DownloadSkipped
     cmd = build_ytdlp_cmd("https://youtube.com/watch?v=x", tmp_path)
     assert "--write-sub" in cmd and "zh-Hans,zh,en" in " ".join(cmd)
+    assert "youtube:player_client=tv" in " ".join(cmd)
     def fail429(*a, **k):
         class R: returncode = 1; stderr = "HTTP Error 429"; stdout = ""
         return R()

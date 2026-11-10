@@ -334,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         vid = video.get("video_id", "")
         work_dir = work_root / vid
         _log(f"triaging {vid}: {video.get('title', '')}")
-        srt = triage_mod.fetch_subtitles(vid, work_dir)
+        srt = triage_mod.fetch_subtitles(vid, work_dir, cookies_file=cookies_file)
         if srt is None:
             _skip(skipped, data, vid, "no_subtitles")
             continue

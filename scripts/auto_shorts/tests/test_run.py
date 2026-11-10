@@ -12,7 +12,8 @@ def _mock_triage_ok(monkeypatch, tmp_path, hook="wait, this changes everything",
     from scripts.auto_shorts import run as run_mod
     from scripts.auto_shorts import triage as triage_mod
 
-    def fake_fetch(video_id, work_dir, langs="zh-Hans,zh,en", runner=None):
+    def fake_fetch(video_id, work_dir, langs="zh-Hans,zh,en", runner=None,
+                   cookies_file=None):
         d = Path(work_dir)
         d.mkdir(parents=True, exist_ok=True)
         srt = d / f"{video_id}.en.srt"

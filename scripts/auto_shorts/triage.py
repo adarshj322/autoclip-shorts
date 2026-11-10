@@ -40,6 +40,7 @@ def fetch_subtitles(
     work_dir: Path,
     langs: str = "zh-Hans,zh,en",
     runner=None,
+    cookies_file: Path | None = None,
 ) -> Path | None:
     """Fetch auto-subs for ``video_id`` into ``work_dir``; None if unfetchable."""
     run = runner or _default_runner
@@ -47,6 +48,9 @@ def fetch_subtitles(
     work.mkdir(parents=True, exist_ok=True)
     cmd = [
         "yt-dlp",
+        # tv client rides out YouTube's datacenter-IP bot wall (probed 2026-11-10)
+        "--extractor-args",
+        "youtube:player_client=tv",
         "--write-auto-subs",
         "--skip-download",
         "--sub-langs",
@@ -55,8 +59,10 @@ def fetch_subtitles(
         "srt",
         "-o",
         str(work / "%(id)s.%(ext)s"),
-        f"https://www.youtube.com/watch?v={video_id}",
     ]
+    if cookies_file is not None:
+        cmd += ["--cookies", str(cookies_file)]
+    cmd.append(f"https://www.youtube.com/watch?v={video_id}")
     try:
         result = run(cmd)
     except Exception:

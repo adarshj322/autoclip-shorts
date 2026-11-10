@@ -37,7 +37,8 @@ def _setup_ok_pipeline(monkeypatch, tmp_path, clip_title="My Clip Title"):
     payload = {"project_id": "p1", "clips": [
         {"id": "c1", "title": clip_title, "score_100": 90}]}
 
-    def fake_fetch(video_id, work_dir, langs="zh-Hans,zh,en", runner=None):
+    def fake_fetch(video_id, work_dir, langs="zh-Hans,zh,en", runner=None,
+                   cookies_file=None):
         d = Path(work_dir)
         d.mkdir(parents=True, exist_ok=True)
         srt = d / f"{video_id}.en.srt"

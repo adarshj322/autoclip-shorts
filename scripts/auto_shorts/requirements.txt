@@ -3,3 +3,7 @@
 scenedetect==0.7.1
 opencv-python-headless==4.10.0.84
 mediapipe==0.10.18
+# YouTube bot-walls this VPS IP on yt-dlp 2026.8.19 even with cookies;
+# 2026.10.26 + player_client=tv works (probed 2026-11-10). Overrides the
+# root pin for this venv only; the desktop bundle keeps 2026.8.19.
+yt-dlp[default]==2026.10.26

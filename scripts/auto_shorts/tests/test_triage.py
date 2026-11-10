@@ -39,6 +39,23 @@ def test_fetch_subtitles_ignores_foreign_srt(tmp_path):
     assert fetch_subtitles("myvideo", tmp_path, runner=ok) is None
 
 
+def test_fetch_subtitles_uses_tv_client_and_cookies(tmp_path):
+    from scripts.auto_shorts.triage import fetch_subtitles
+    seen = {}
+    def ok(cmd, *a, **k):
+        seen["cmd"] = list(cmd)
+        (tmp_path / "myvideo.en.srt").write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nhi\n")
+        class R: returncode = 0; stderr = ""; stdout = ""
+        return R()
+    out = fetch_subtitles("myvideo", tmp_path, runner=ok,
+                          cookies_file=tmp_path / "c.txt")
+    assert out is not None
+    assert "youtube:player_client=tv" in " ".join(seen["cmd"])
+    assert "--cookies" in seen["cmd"]
+    assert str(tmp_path / "c.txt") in seen["cmd"]
+
+
 def test_score_video_caps_llm_calls_at_15(monkeypatch):
     from scripts.auto_shorts import triage as triage_mod
     windows = [{"start": float(i), "end": float(i + 5),

@@ -40,6 +40,9 @@ def build_ytdlp_cmd(
 ) -> list[str]:
     cmd = [
         "yt-dlp",
+        # tv client rides out YouTube's datacenter-IP bot wall (probed 2026-11-10)
+        "--extractor-args",
+        "youtube:player_client=tv",
         "-f",
         FORMAT,
         "--write-sub",
